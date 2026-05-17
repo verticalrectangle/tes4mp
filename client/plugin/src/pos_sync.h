@@ -8,6 +8,7 @@ void PosSync_Stop();
 struct PlayerState {
     float    x, y, z, rotZ;
     uint32_t cellFormID;
+    uint32_t worldspaceFormID;  // 0 for interior cells
     bool     valid;
 };
 PlayerState PosSync_GetLocal();

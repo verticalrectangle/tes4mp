@@ -33,6 +33,10 @@ static constexpr ptrdiff_t OFF_FORM_ID     = Oblivion::kForm_refID; // 0x00C
 static std::mutex    g_localMtx;
 static PlayerState   g_local = {};
 
+// TESObjectCELL offsets (from GameForms.h)
+static constexpr ptrdiff_t OFF_CELL_FLAGS0      = 0x024; // UInt8 — bit 0 = interior
+static constexpr ptrdiff_t OFF_CELL_WORLDSPACE  = 0x050; // TESWorldSpace*
+
 static PlayerState SamplePlayer() {
     PlayerState s = {};
     void* player = *(void**)ADDR_PLAYER_PTR;
@@ -43,7 +47,18 @@ static PlayerState SamplePlayer() {
     s.z          = *(float*)((char*)player + OFF_REF_POS_Z);
     s.rotZ       = *(float*)((char*)player + OFF_REF_ROT_Z);
     s.cellFormID = cell ? *(uint32_t*)((char*)cell + OFF_FORM_ID) : 0;
-    s.valid      = true;
+
+    // Worldspace: 0 for interior cells, non-zero for exterior (e.g. Tamriel = 0x3C)
+    if (cell) {
+        uint8_t flags0 = *(uint8_t*)((char*)cell + OFF_CELL_FLAGS0);
+        bool interior  = (flags0 & 0x01) != 0;
+        if (!interior) {
+            void* ws = *(void**)((char*)cell + OFF_CELL_WORLDSPACE);
+            s.worldspaceFormID = ws ? *(uint32_t*)((char*)ws + OFF_FORM_ID) : 0;
+        }
+    }
+
+    s.valid = true;
     return s;
 }
 
@@ -101,13 +116,16 @@ static void PollThread() {
                 int   anim  = ClassifyAnim(now, last, dtSec);
 
                 if (dist > POS_DEAD_BAND || dr > ROT_DEAD_BAND
-                        || now.cellFormID != last.cellFormID || anim != lastAnim) {
-                    char buf[160];
+                        || now.cellFormID != last.cellFormID
+                        || now.worldspaceFormID != last.worldspaceFormID
+                        || anim != lastAnim) {
+                    char buf[192];
                     snprintf(buf, sizeof(buf),
                         "{\"type\":\"POSITION_UPDATE\","
                         "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
-                        "\"rot\":%.4f,\"cell\":%u,\"anim\":%d}",
-                        now.x, now.y, now.z, now.rotZ, now.cellFormID, anim);
+                        "\"rot\":%.4f,\"cell\":%u,\"ws\":%u,\"anim\":%d}",
+                        now.x, now.y, now.z, now.rotZ,
+                        now.cellFormID, now.worldspaceFormID, anim);
                     g_network.send(buf);
                     last     = now;
                     lastMs   = nowMs;

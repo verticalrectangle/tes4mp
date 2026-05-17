@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <cstdint>
 
 static void GS_DBG(const std::string& s) {
     std::ofstream f("C:\\tes4mp_debug.txt", std::ios::app);
@@ -46,6 +47,24 @@ struct Snap {
     float x, y, z, rotZ;
 };
 
+// ── Race EditorID lookup (Oblivion.esm — formID low 3 bytes) ─────────────────
+
+static const char* RaceEditorId(uint32_t fid) {
+    switch (fid & 0x00FFFFFF) {
+    case 0x023FE9: return "ImperialRace";
+    case 0x0224FD: return "NordRace";
+    case 0x023FEA: return "DarkElfRace";
+    case 0x0224FC: return "HighElfRace";
+    case 0x0224FE: return "WoodElfRace";
+    case 0x0224FF: return "BretonRace";
+    case 0x0224F8: return "OrcRace";
+    case 0x0224F9: return "RedguardRace";
+    case 0x0224FB: return "KhajiitRace";
+    case 0x0224FA: return "ArgonianRace";
+    default:       return nullptr;
+    }
+}
+
 // ── Ghost state ───────────────────────────────────────────────────────────────
 
 enum class Phase { Free, Spawning, Active };
@@ -54,6 +73,8 @@ struct Ghost {
     Phase       phase        = Phase::Free;
     int         slot         = -1;
     std::string name;
+    uint32_t    raceFormId   = 0;
+    int         gender       = 0;
 
     Snap        buf[SNAP_CAP] = {};
     int         head          = 0;
@@ -76,6 +97,8 @@ struct Evt {
     EvtType     type;
     std::string charId;
     std::string name;
+    uint32_t    raceFormId;
+    int         gender;
     float       x, y, z, rotZ;
     int         animGroup;
 };
@@ -222,9 +245,11 @@ static void DrainEvents() {
                 }
                 if (slot < 0) { GS_DBG("no free slot for " + ev.charId); break; }
                 gh.slot = slot;
-                gh.name = ev.name;
                 GS_DBG("Appear charId=" + ev.charId + " slot=" + std::to_string(slot));
             }
+            gh.name       = ev.name;
+            gh.raceFormId = ev.raceFormId;
+            gh.gender     = ev.gender;
 
             PushSnap(gh, ev.x, ev.y, ev.z, ev.rotZ);
             gh.animGroup    = ev.animGroup;
@@ -302,10 +327,25 @@ static void TickGhosts() {
             gh.appliedAnim = -1;
             gh.phase       = Phase::Active;
 
-            char buf[64];
+            char buf[128];
             snprintf(buf, sizeof(buf), "prid %08X", fid);
             EnqCmd(buf);
             EnqCmd("setrestrained 1");  // freeze AI so position writes stick
+
+            // Apply player name (OBSE SetName — per-ref, doesn't affect base form)
+            if (!gh.name.empty()) {
+                snprintf(buf, sizeof(buf), "SetName \"%s\"", gh.name.c_str());
+                EnqCmd(buf);
+            }
+
+            // Apply race if we know it (creates a per-ref change record)
+            if (gh.raceFormId) {
+                const char* raceEd = RaceEditorId(gh.raceFormId);
+                if (raceEd) {
+                    snprintf(buf, sizeof(buf), "setrace %s", raceEd);
+                    EnqCmd(buf);
+                }
+            }
 
             GS_DBG("spawned ghost charId=" + charId
                    + " fid=" + std::to_string(fid)
@@ -365,19 +405,20 @@ void GhostSystem_Shutdown() {
 }
 
 void GhostSystem_OnAppear(const std::string& charId, const std::string& charName,
+                          uint32_t raceFormId, int gender,
                           float x, float y, float z, float rotZ, int animGroup)
 {
-    PushEvt({ EvtType::Appear, charId, charName, x, y, z, rotZ, animGroup });
+    PushEvt({ EvtType::Appear, charId, charName, raceFormId, gender, x, y, z, rotZ, animGroup });
 }
 
 void GhostSystem_OnLeave(const std::string& charId) {
-    PushEvt({ EvtType::Leave, charId, {}, 0, 0, 0, 0, 0 });
+    PushEvt({ EvtType::Leave, charId, {}, 0, 0, 0, 0, 0, 0, 0 });
 }
 
 void GhostSystem_OnPosUpdate(const std::string& charId,
                              float x, float y, float z, float rotZ, int animGroup)
 {
-    PushEvt({ EvtType::PosUpdate, charId, {}, x, y, z, rotZ, animGroup });
+    PushEvt({ EvtType::PosUpdate, charId, {}, 0, 0, x, y, z, rotZ, animGroup });
 }
 
 void GhostSystem_OnFrame() {

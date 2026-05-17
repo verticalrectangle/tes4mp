@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <cstdint>
 
 // Callback type for enqueuing a console command (thread-safe).
 typedef void (*GhostCmdFn)(const char* cmd);
@@ -10,7 +11,10 @@ void GhostSystem_Init(int numSlots, GhostCmdFn cmdFn);
 void GhostSystem_Shutdown();
 
 // Called from the network thread — thread-safe.
+// raceFormId: TESRace formID from the remote player's appearance (0 = unknown).
+// gender: 0=male, 1=female (0 = unknown/default).
 void GhostSystem_OnAppear(const std::string& charId, const std::string& charName,
+                          uint32_t raceFormId, int gender,
                           float x, float y, float z, float rotZ, int animGroup);
 void GhostSystem_OnLeave(const std::string& charId);
 void GhostSystem_OnPosUpdate(const std::string& charId,

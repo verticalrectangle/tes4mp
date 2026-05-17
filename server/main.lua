@@ -141,10 +141,11 @@ while true do
                 table.insert(sockets, client)
                 local addr = tostring(client:getpeername())
                 clients[client] = {
-                    buffer  = "",
-                    state   = "pending_hello",
-                    char_id = nil,
-                    addr    = addr,
+                    buffer     = "",
+                    state      = "pending_hello",
+                    char_id    = nil,
+                    addr       = addr,
+                    last_heard = socket.gettime(),
                 }
                 -- Send server hello so client knows to show login prompt
                 client:send(json.encode({
@@ -161,6 +162,7 @@ while true do
                 local data, serr, partial = sock:receive("*l")
                 local line = data or partial
                 if line and #line > 0 then
+                    info.last_heard = socket.gettime()
                     info.buffer = info.buffer .. line
                     if data then
                         local ok, err = pcall(handlePacket, sock, info, info.buffer)
@@ -177,5 +179,18 @@ while true do
         end
     end
 
-    tick = tick + 1  -- reserved for future periodic maintenance
+    -- Kill clients that haven't sent anything in 15s (crash / hard disconnect)
+    local now = socket.gettime()
+    local timed_out = {}
+    for sock, info in pairs(clients) do
+        if sock ~= srv and (now - (info.last_heard or now)) > 15 then
+            timed_out[#timed_out + 1] = sock
+        end
+    end
+    for _, sock in ipairs(timed_out) do
+        print(("[server] timeout: %s"):format(clients[sock].addr))
+        removeClient(sock)
+    end
+
+    tick = tick + 1
 end

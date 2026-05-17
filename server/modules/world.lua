@@ -15,17 +15,35 @@ end
 
 local MAX_MOVE_SPEED = 1000  -- units/s — generous cap; enchantments can push ~600
 
+-- Exterior zone size: 3 Oblivion exterior cells (4096 units each).
+-- Players within the same zone see each other without GHOST_APPEAR/LEAVE cycling.
+local EXTERIOR_ZONE = 4096 * 3
+
+local function cellKey(pkt, x, y)
+    local ws = tonumber(pkt.ws) or 0
+    if ws == 0 then
+        -- Interior: use exact cell formID. Treat formID 0 as "no cell".
+        local fid = tonumber(pkt.cell) or 0
+        return fid ~= 0 and tostring(fid) or ""
+    else
+        -- Exterior: bucket into zone grid so adjacent cells share a key.
+        local gx = math.floor(x / EXTERIOR_ZONE)
+        local gy = math.floor(y / EXTERIOR_ZONE)
+        return "E" .. ws .. ":" .. gx .. ":" .. gy
+    end
+end
+
 function M.handlePositionUpdate(char_id, pkt)
     local json = require("cjson")
     local socket = require("socket")
 
-    local cell = tostring(pkt.cell or "")
     local x    = tonumber(pkt.x)   or 0
     local y    = tonumber(pkt.y)   or 0
     local z    = tonumber(pkt.z)   or 0
     local rot  = tonumber(pkt.rot) or 0
     local anim = tonumber(pkt.anim) or 0
     local now  = socket.gettime()
+    local cell = cellKey(pkt, x, y)
 
     -- Speed validation (horizontal distance only — ignore Z for jumps/ledges)
     local last = session.getPosCache(char_id)
@@ -59,38 +77,28 @@ function M.handlePositionUpdate(char_id, pkt)
         session.updateCell(char_id, cell)
 
         if cell ~= "" then
-            local appear = session.getAppearanceCached(char_id)
-
-            -- Tell new cell members this ghost is appearing
+            -- Tell new cell members this ghost is appearing (always, appearance optional)
+            local appear    = session.getAppearanceCached(char_id)
+            local appearpkt = { type = "GHOST_APPEAR", char_id = tostring(char_id),
+                                 char_name = sess.name, x = x, y = y, z = z, rot = rot }
             if appear then
                 local ok, decoded = pcall(json.decode, appear)
-                if ok then
-                    session.broadcastToCell(cell, json.encode({
-                        type       = "GHOST_APPEAR",
-                        char_id    = tostring(char_id),
-                        char_name  = sess.name,
-                        x = x, y = y, z = z, rot = rot,
-                        appearance = decoded,
-                    }), char_id)
-                end
+                if ok then appearpkt.appearance = decoded end
             end
+            session.broadcastToCell(cell, json.encode(appearpkt), char_id)
 
             -- Tell the moving player about everyone already in the new cell
             for _, other in ipairs(session.getInCell(cell, char_id)) do
+                local otherpkt = { type = "GHOST_APPEAR", char_id = tostring(other.char_id),
+                                   char_name = other.name,
+                                   x = other.last_pos.x, y = other.last_pos.y,
+                                   z = other.last_pos.z, rot = 0 }
                 local otherAppear = session.getAppearanceCached(other.char_id)
                 if otherAppear then
                     local ok2, decoded2 = pcall(json.decode, otherAppear)
-                    if ok2 then
-                        session.sendTo(char_id, json.encode({
-                            type       = "GHOST_APPEAR",
-                            char_id    = tostring(other.char_id),
-                            char_name  = other.name,
-                            x = other.last_pos.x, y = other.last_pos.y, z = other.last_pos.z,
-                            rot = 0,
-                            appearance = decoded2,
-                        }))
-                    end
+                    if ok2 then otherpkt.appearance = decoded2 end
                 end
+                session.sendTo(char_id, json.encode(otherpkt))
             end
         end
     end

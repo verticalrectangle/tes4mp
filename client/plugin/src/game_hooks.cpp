@@ -326,7 +326,15 @@ static void ApplyCharLoad(const std::string& raw) {
 // ── Background poll loop ───────────────────────────────────────────────────────
 
 static void PollLoop() {
+    DWORD lastPing = 0;
     while (g_running) {
+        // Keepalive — lets server detect crashes within 15s
+        DWORD now = GetTickCount();
+        if (g_network.isConnected() && (now - lastPing) >= 5000) {
+            g_network.send("{\"type\":\"PING\"}");
+            lastPing = now;
+        }
+
         Packet pkt;
         while (g_network.pollPacket(pkt)) {
             switch (pkt.type) {
@@ -429,8 +437,11 @@ static void PollLoop() {
 
             case PacketType::GhostAppear: {
                 std::string charName = json::getStr(pkt.raw, "char_name");
+                // "race" and "gender" live inside the appearance sub-object
+                auto raceId = static_cast<uint32_t>(JF(pkt.raw, "race"));
+                auto gender = static_cast<int>(JF(pkt.raw, "gender"));
                 GhostSystem_OnAppear(
-                    pkt.strField, charName,
+                    pkt.strField, charName, raceId, gender,
                     JF(pkt.raw, "x"), JF(pkt.raw, "y"), JF(pkt.raw, "z"),
                     JF(pkt.raw, "rot"), (int)JF(pkt.raw, "anim"));
                 if (!charName.empty())
