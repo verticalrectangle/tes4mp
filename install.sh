@@ -144,16 +144,45 @@ if [[ "$(uname -s)" == "Linux" ]]; then
     if [[ ! -f "$LOADER" ]]; then
         yellow "obse_loader.exe not found — skipping patches"
     else
-        LOADER_BYTE="$(dd if="$LOADER" bs=1 skip=$((0x14cb)) count=1 2>/dev/null | xxd -p)"
-        if [[ "$LOADER_BYTE" == "75" ]]; then
-            cp "$LOADER" "$LOADER.bak"
-            printf '\x90\x90\x90' | dd conv=notrunc of="$LOADER" bs=1 seek=$((0x14cb)) 2>/dev/null
-            green "  obse_loader.exe patched (Steam check NOP'd)"
-        elif [[ "$LOADER_BYTE" == "90" ]]; then
-            green "  obse_loader.exe already patched — skipping"
-        else
-            yellow "  obse_loader.exe: unexpected byte at 0x14CB ($LOADER_BYTE) — skipping patch"
-        fi
+        PATCH_RESULT="$(python3 - "$LOADER" <<'PYEOF'
+import sys, shutil, os
+
+path = sys.argv[1]
+data = bytearray(open(path, 'rb').read())
+
+# Pattern immediately before the Steam ownership JNZ:
+#   b0 01          MOV AL, 1
+#   88 44 24 13    MOV [ESP+13h], AL
+#   75 ??          JNZ <fail>   ← we NOP this
+pat = bytes([0xb0, 0x01, 0x88, 0x44, 0x24, 0x13])
+idx = data.find(pat)
+if idx == -1:
+    print("NOTFOUND")
+    sys.exit(0)
+
+jnz_off = idx + len(pat)
+if data[jnz_off] == 0x90:
+    print("ALREADY")
+    sys.exit(0)
+
+if data[jnz_off] != 0x75:
+    print(f"UNEXPECTED {data[jnz_off]:02x} at {jnz_off:#x}")
+    sys.exit(0)
+
+shutil.copy2(path, path + ".bak")
+data[jnz_off]     = 0x90  # NOP the JNZ opcode
+data[jnz_off + 1] = 0x90  # NOP the offset byte
+open(path, 'wb').write(data)
+print(f"PATCHED {jnz_off:#x}")
+PYEOF
+)"
+        case "$PATCH_RESULT" in
+            PATCHED*)  green "  obse_loader.exe patched at ${PATCH_RESULT#PATCHED } (Steam check NOP'd)" ;;
+            ALREADY)   green "  obse_loader.exe already patched — skipping" ;;
+            NOTFOUND)  yellow "  obse_loader.exe: Steam check pattern not found — skipping patch" ;;
+            *)         yellow "  obse_loader.exe: $PATCH_RESULT — skipping patch" ;;
+        esac
+    fi
 
         if [[ ! -f "$LAUNCHER" ]]; then
             yellow "  OblivionLauncher.exe not found — skipping launcher patch"
