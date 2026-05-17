@@ -44,6 +44,14 @@ begin GameMode
         string_var sToken
         let sToken := TES4MP_GetToken
 
+        ; Register pre-placed ghost NPC refs with the plugin so it can write
+        ; positions directly to their memory. These are persistent disabled ACHRs
+        ; from TES4MP.esp — OBSE resolves the EditorID to a TESObjectREFR* for us.
+        TES4MPGhostACHR01.TES4MP_SetGhostRef 0
+        TES4MPGhostACHR02.TES4MP_SetGhostRef 1
+        TES4MPGhostACHR03.TES4MP_SetGhostRef 2
+        TES4MPGhostACHR04.TES4MP_SetGhostRef 3
+
         ; Connect and send AUTH
         let bConnected := TES4MP_Connect sServerHost iServerPort sName sToken
         if ( bConnected == 0 )

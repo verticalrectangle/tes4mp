@@ -24,6 +24,7 @@ function M.handlePositionUpdate(char_id, pkt)
     local y    = tonumber(pkt.y)   or 0
     local z    = tonumber(pkt.z)   or 0
     local rot  = tonumber(pkt.rot) or 0
+    local anim = tonumber(pkt.anim) or 0
     local now  = socket.gettime()
 
     -- Speed validation (horizontal distance only — ignore Z for jumps/ledges)
@@ -98,7 +99,7 @@ function M.handlePositionUpdate(char_id, pkt)
     if cell ~= "" then
         session.broadcastToCell(cell,
             json.encode({ type = "PLAYER_POS", char_id = tostring(char_id),
-                          x = x, y = y, z = z, rot = rot }),
+                          x = x, y = y, z = z, rot = rot, anim = anim }),
             char_id)
     end
 end

@@ -18,3 +18,10 @@ void GameHooks_Tick();
 
 // Stop background threads on unload.
 void GameHooks_Shutdown();
+
+// Thread-safe: enqueue a console command to run on the next game tick.
+// Used by ghost_system and other subsystems from any thread.
+void GameHooks_EnqueueCmd(const char* cmd);
+
+// Called by TES4MP_SetGhostRef script command to hand us a pre-placed ACHR pointer.
+void GhostRef_Register(int slot, void* ref);

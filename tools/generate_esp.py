@@ -32,8 +32,18 @@ FID = {
     "QUST_MAIN":   0x00000D65,
     "QUST_QUESTS": 0x00000D66,
     "MISC_TERM":   0x00000D67,
+    # Ghost NPC holding cell + 4 placed NPC refs (initially disabled)
+    "CELL_GHOST":  0x00000D68,
+    "ACHR_GHOST1": 0x00000D69,
+    "ACHR_GHOST2": 0x00000D6A,
+    "ACHR_GHOST3": 0x00000D6B,
+    "ACHR_GHOST4": 0x00000D6C,
 }
-NEXT_OBJECT_ID = 0x00000D68
+NEXT_OBJECT_ID = 0x00000D6D
+
+# Vanilla Imperial Watch guard from Oblivion.esm — used as ghost NPC base.
+# High byte 0x00 = first master file (Oblivion.esm).
+GHOST_BASE_NPC = 0x0001C34F
 
 
 # ── Binary helpers ────────────────────────────────────────────────────────────
@@ -54,9 +64,14 @@ def rec(t: str, form_id: int, flags: int, *subs) -> bytes:
     )
 
 def grp(label: bytes, records: bytes) -> bytes:
-    """Top-level GRUP: 20-byte header (size includes the header itself)."""
+    """Top-level GRUP (type 0): 20-byte header (size includes the header itself)."""
     total = 20 + len(records)
     return b"GRUP" + struct.pack("<I", total) + label + struct.pack("<II", 0, 0) + records
+
+def grp_typed(label: bytes, group_type: int, records: bytes) -> bytes:
+    """Typed GRUP: 2=interior block, 3=interior sub-block, 6=cell persistent children."""
+    total = 20 + len(records)
+    return b"GRUP" + struct.pack("<I", total) + label + struct.pack("<II", group_type, 0) + records
 
 
 # ── Record builders ───────────────────────────────────────────────────────────
@@ -88,6 +103,21 @@ def make_qust(form_id: int, editor_id: str, script_fid: int) -> bytes:
         sub("DATA", struct.pack("<BB", 0x01, 100)),
     )
 
+def make_cell(form_id: int, editor_id: str) -> bytes:
+    """Interior CELL record."""
+    return rec("CELL", form_id, 0,
+        sub("EDID", editor_id),
+        sub("DATA", struct.pack("<B", 0x01)),  # 0x01 = interior flag
+    )
+
+def make_achr(form_id: int, editor_id: str, base_npc_fid: int) -> bytes:
+    """ACHR: placed NPC reference, initially disabled."""
+    return rec("ACHR", form_id, 0x00000800,  # 0x800 = Initially Disabled
+        sub("EDID", editor_id),
+        sub("NAME", struct.pack("<I", base_npc_fid)),
+        sub("DATA", struct.pack("<ffffff", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    )
+
 def make_misc(form_id: int, editor_id: str, display: str, script_fid: int) -> bytes:
     """MISC record: weightless, worthless inventory item."""
     return rec("MISC", form_id, 0,
@@ -111,7 +141,7 @@ def build_esp() -> bytes:
     src_menu   = read_script("TES4MPMenu.txt")
 
     # TES4 header
-    hedr_data = struct.pack("<fII", 0.94, 6, NEXT_OBJECT_ID)
+    hedr_data = struct.pack("<fII", 0.94, 10, NEXT_OBJECT_ID)
     tes4 = rec("TES4", 0, 0,
         sub("HEDR", hedr_data),
         sub("CNAM", "TES4MP"),
@@ -132,11 +162,27 @@ def build_esp() -> bytes:
     # Terminal misc item
     misc_term = make_misc(FID["MISC_TERM"], "TES4MPTerminal", "TES4MP Terminal", FID["SCPT_MENU"])
 
+    # Ghost NPC refs — 4 persistent disabled ACHRs in a private interior cell.
+    # The plugin enables/disables them at runtime via prid+enable/disable+moveto.
+    achr_records = b"".join(
+        make_achr(FID[f"ACHR_GHOST{i}"], f"TES4MPGhostACHR0{i}", GHOST_BASE_NPC)
+        for i in range(1, 5)
+    )
+    ghost_cell = (
+        make_cell(FID["CELL_GHOST"], "TES4MPGhostHolding")
+        + grp_typed(struct.pack("<I", FID["CELL_GHOST"]), 6, achr_records)
+    )
+    interior_block = grp_typed(
+        struct.pack("<I", 0), 2,
+        grp_typed(struct.pack("<I", 0), 3, ghost_cell)
+    )
+
     return (
         tes4
         + grp(b"SCPT", scpt_main + scpt_quests + scpt_menu)
         + grp(b"QUST", qust_main + qust_quests)
         + grp(b"MISC", misc_term)
+        + interior_block
     )
 
 if __name__ == "__main__":

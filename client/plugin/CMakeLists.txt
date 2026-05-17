@@ -14,6 +14,8 @@ add_library(TES4MP SHARED
     src/ui.cpp
     src/pos_sync.cpp
     src/appearance.cpp
+    src/d3d_hook.cpp
+    src/ghost_system.cpp
 )
 
 target_include_directories(TES4MP PRIVATE
@@ -38,6 +40,7 @@ target_link_libraries(TES4MP PRIVATE
     ws2_32    # Winsock
     shell32   # SHGetFolderPath
     advapi32  # GetUserNameA
+    d3d9      # D3D9 Present hook
     -static-libgcc
     -static-libstdc++
     # Statically link winpthread and the UCRT so Wine doesn't need external DLLs
