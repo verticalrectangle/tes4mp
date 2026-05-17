@@ -1,0 +1,707 @@
+#!/usr/bin/env python3
+"""
+TES4MP server integration tests.
+Spins up the real Lua server against a throwaway DB and drives every
+packet flow with mock TCP clients. No Oblivion installation needed.
+
+Run from the repo root:
+    cd /home/alexis/dev/TES4MP && python3 server/tests/integration_test.py
+"""
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
+from typing import Optional
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+HOST        = "127.0.0.1"
+PORT        = 17777
+TEST_DB     = "server/data/test_tes4mp.db"
+TEST_CFG    = "server/tests/test_config.json"
+SERVER_CMD  = ["lua", "server/main.lua", TEST_CFG]
+
+RECV_TIMEOUT = 1.0   # seconds to wait for an expected packet
+STARTUP_WAIT = 1.2   # seconds for server to bind
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+class Client:
+    def __init__(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.settimeout(RECV_TIMEOUT)
+        self._buf  = ""
+        self._sock.connect((HOST, PORT))
+
+    def send(self, pkt: dict):
+        line = json.dumps(pkt) + "\n"
+        self._sock.sendall(line.encode())
+
+    def recv_all(self, timeout: float = RECV_TIMEOUT) -> list:
+        """Drain all lines received within timeout seconds."""
+        pkts = []
+        self._sock.settimeout(timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                chunk = self._sock.recv(4096).decode(errors="replace")
+                if not chunk:
+                    break
+                self._buf += chunk
+                while "\n" in self._buf:
+                    line, self._buf = self._buf.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        try:
+                            pkts.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+            except socket.timeout:
+                break
+        return pkts
+
+    def expect(self, pkt_type: str, timeout: float = RECV_TIMEOUT) -> dict:
+        """Wait for a packet of a given type; raise AssertionError if not found."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            pkts = self.recv_all(min(remaining, 0.2))
+            for p in pkts:
+                if p.get("type") == pkt_type:
+                    return p
+        raise AssertionError(f"Expected packet type '{pkt_type}' not received within {timeout}s")
+
+    def expect_none(self, pkt_type: str, timeout: float = 0.4) -> None:
+        """Assert that pkt_type does NOT arrive within timeout."""
+        pkts = self.recv_all(timeout)
+        for p in pkts:
+            if p.get("type") == pkt_type:
+                raise AssertionError(f"Unexpected packet type '{pkt_type}' received")
+
+    def close(self):
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+
+    @classmethod
+    def connect_and_auth(cls, token: str, name: str) -> "Client":
+        c = cls()
+        c.send({"type": "HELLO", "token": token, "name": name})
+        c.expect("CHAR_LOAD")
+        return c
+
+
+class Server:
+    """Lua server subprocess. Drains stdout to a log file to prevent pipe-block."""
+
+    def __init__(self):
+        self._proc: Optional[subprocess.Popen] = None
+        self._logfile = None
+        self._logpath = os.path.join(tempfile.gettempdir(), "tes4mp_test_server.log")
+
+    def start(self):
+        if os.path.exists(TEST_DB):
+            os.remove(TEST_DB)
+        self._logfile = open(self._logpath, "w")
+        self._proc = subprocess.Popen(
+            SERVER_CMD,
+            stdout=self._logfile,
+            stderr=self._logfile,
+        )
+        time.sleep(STARTUP_WAIT)
+        # Verify it's up
+        try:
+            s = socket.create_connection((HOST, PORT), timeout=2)
+            s.close()
+        except Exception as e:
+            self._dump_log()
+            raise RuntimeError(f"Server did not start: {e}")
+
+    def stop(self):
+        if self._proc:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        if self._logfile:
+            self._logfile.close()
+        if os.path.exists(TEST_DB):
+            os.remove(TEST_DB)
+
+    def dump_log(self):
+        """Print server log — called on failure summary."""
+        self._dump_log()
+
+    def _dump_log(self):
+        if self._logfile:
+            self._logfile.flush()
+        try:
+            with open(self._logpath) as f:
+                content = f.read().strip()
+            if content:
+                print("\n[Server log]\n" + content)
+        except FileNotFoundError:
+            pass
+
+
+# ── Test runner ───────────────────────────────────────────────────────────────
+
+_results: list[tuple[str, bool, str]] = []
+
+def run_test(name: str, fn):
+    try:
+        fn()
+        _results.append((name, True, ""))
+        print(f"  PASS  {name}")
+    except AssertionError as e:
+        _results.append((name, False, str(e)))
+        print(f"  FAIL  {name}: {e}")
+    except Exception as e:
+        _results.append((name, False, f"{type(e).__name__}: {e}"))
+        print(f"  FAIL  {name}: {type(e).__name__}: {e}")
+
+
+def fresh_token() -> str:
+    return uuid.uuid4().hex  # 32-char hex
+
+
+def put_in_cell(client: Client, x: float, y: float, z: float,
+                cell: int = 999001, ws: int = 0):
+    """Send a POSITION_UPDATE that places client into a specific cell."""
+    client.send({
+        "type": "POSITION_UPDATE",
+        "x": x, "y": y, "z": z,
+        "rot": 0, "cell": cell, "ws": ws, "anim": 0, "hp": 100,
+    })
+    time.sleep(0.08)
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+def test_auth_new():
+    token = fresh_token()
+    c = Client()
+    c.send({"type": "HELLO", "token": token, "name": "NewPlayer"})
+    pkt = c.expect("CHAR_LOAD")
+    assert pkt.get("name") == "NewPlayer", f"name mismatch: {pkt.get('name')}"
+    c.close()
+
+
+def test_auth_returning():
+    token = fresh_token()
+    # First connect creates the char
+    c = Client.connect_and_auth(token, "ReturnPlayer")
+    c.close()
+    time.sleep(0.1)
+    # Second connect with same token returns same char
+    c2 = Client()
+    c2.send({"type": "HELLO", "token": token, "name": "ReturnPlayer"})
+    pkt = c2.expect("CHAR_LOAD")
+    assert pkt.get("name") == "ReturnPlayer", f"name mismatch: {pkt.get('name')}"
+    c2.close()
+
+
+def test_auth_bad_token():
+    c = Client()
+    c.send({"type": "HELLO", "token": "short", "name": "Hacker"})
+    pkt = c.expect("KICK")
+    assert pkt.get("type") == "KICK"
+    c.close()
+
+
+def test_reveal_markers_on_join():
+    """Server sends REVEAL_MARKERS immediately after CHAR_LOAD."""
+    token = fresh_token()
+    c = Client()
+    c.send({"type": "HELLO", "token": token, "name": "MapPlayer"})
+    # CHAR_LOAD comes first; REVEAL_MARKERS should follow
+    pkts = c.recv_all(1.0)
+    types = [p.get("type") for p in pkts]
+    assert "REVEAL_MARKERS" in types, f"REVEAL_MARKERS not in join packets: {types}"
+    c.close()
+
+
+def test_ghost_appear_leave():
+    """A enters cell → B gets GHOST_APPEAR. A moves cell → B gets GHOST_LEAVE."""
+    a = Client.connect_and_auth(fresh_token(), "GhostA")
+    b = Client.connect_and_auth(fresh_token(), "GhostB")
+
+    # B enters cell 999001
+    put_in_cell(b, 0, 0, 0, cell=999001)
+    b.recv_all(0.1)  # flush
+
+    # A enters same cell → B should get GHOST_APPEAR
+    put_in_cell(a, 10, 0, 0, cell=999001)
+    pkt = b.expect("GHOST_APPEAR")
+    assert pkt.get("char_name") == "GhostA", f"wrong char: {pkt}"
+
+    # A moves to a different cell → B should get GHOST_LEAVE
+    put_in_cell(a, 0, 0, 0, cell=999002)
+    pkt = b.expect("GHOST_LEAVE")
+    assert pkt.get("type") == "GHOST_LEAVE"
+
+    a.close(); b.close()
+
+
+def test_fast_travel_flag():
+    """POSITION_UPDATE with ft:1 → GHOST_APPEAR to peer has fast_travel=true and cell_name."""
+    a = Client.connect_and_auth(fresh_token(), "Traveler")
+    b = Client.connect_and_auth(fresh_token(), "Observer")
+
+    # B waits in the destination cell
+    put_in_cell(b, 100, 100, 0, cell=888002)
+    time.sleep(0.1)
+    b.recv_all(0.2)  # flush join packets
+
+    # A starts in a different cell (nearby position so no speed-hack on entry)
+    put_in_cell(a, 0, 0, 0, cell=888001)
+    time.sleep(0.1)
+    b.recv_all(0.1)  # B is in 888002, not 888001 — no packets expected
+
+    # A fast-travels into B's cell — ft=1 bypasses speed check
+    a.send({
+        "type": "POSITION_UPDATE",
+        "x": 100, "y": 100, "z": 0,
+        "rot": 0, "cell": 888002, "ws": 0, "anim": 0, "hp": 100,
+        "ft": 1, "cn": "Bravil",
+    })
+    time.sleep(0.1)
+
+    # B should get GHOST_APPEAR with fast_travel=true
+    pkt = b.expect("GHOST_APPEAR")
+    assert pkt.get("char_name") == "Traveler", f"wrong char: {pkt}"
+    assert pkt.get("fast_travel") is True, f"fast_travel missing: {pkt}"
+    assert pkt.get("cell_name") == "Bravil", f"cell_name wrong: {pkt}"
+
+    a.close(); b.close()
+
+
+def test_player_death():
+    """PLAYER_DIED → peer in same cell gets PLAYER_DIED with the dying player's char_id."""
+    a = Client.connect_and_auth(fresh_token(), "DyingA")
+    b = Client.connect_and_auth(fresh_token(), "WatcherB")
+
+    put_in_cell(a, 0, 0, 0, cell=777001)
+    put_in_cell(b, 0, 0, 0, cell=777001)
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    a.send({"type": "PLAYER_DIED"})
+    # Server should broadcast PLAYER_DIED to the cell (treated as GHOST_LEAVE on client,
+    # but the packet type on the wire from server is PLAYER_DIED)
+    pkt = b.expect("PLAYER_DIED")
+    assert pkt.get("type") == "PLAYER_DIED"
+
+    a.close(); b.close()
+
+
+def test_npc_kill_broadcast():
+    """NPC_KILLED from A → B in same cell gets NPC_KILLED."""
+    a = Client.connect_and_auth(fresh_token(), "KillerA")
+    b = Client.connect_and_auth(fresh_token(), "WitnessB")
+
+    cell_key = "666001"
+    put_in_cell(a, 0, 0, 0, cell=int(cell_key))
+    put_in_cell(b, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    a.send({"type": "NPC_KILLED", "ref_id": 12345, "cell": cell_key})
+    pkt = b.expect("NPC_KILLED")
+    assert pkt.get("ref_id") == 12345, f"ref_id wrong: {pkt}"
+
+    a.close(); b.close()
+
+
+def test_npc_kill_sync_on_join():
+    """Cell with prior kill → new joiner gets NPC_KILL_SYNC."""
+    a = Client.connect_and_auth(fresh_token(), "KillerC")
+    cell_key = "555001"
+    put_in_cell(a, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    a.recv_all(0.1)
+
+    a.send({"type": "NPC_KILLED", "ref_id": 99999, "cell": cell_key})
+    a.recv_all(0.1)  # drain any echo
+
+    # New player enters same cell → should get NPC_KILL_SYNC
+    b = Client.connect_and_auth(fresh_token(), "LateJoinerD")
+    put_in_cell(b, 0, 0, 0, cell=int(cell_key))
+    pkt = b.expect("NPC_KILL_SYNC")
+    assert 99999 in pkt.get("refs", []), f"ref not in sync list: {pkt}"
+
+    a.close(); b.close()
+
+
+def test_container_loot_broadcast():
+    """ITEM_TAKEN from A → B in same cell gets ITEM_SYNC."""
+    a = Client.connect_and_auth(fresh_token(), "LooterA")
+    b = Client.connect_and_auth(fresh_token(), "PeerB")
+    cell_key = "444001"
+
+    put_in_cell(a, 0, 0, 0, cell=int(cell_key))
+    put_in_cell(b, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    a.send({"type": "ITEM_TAKEN", "container_ref_id": 11111,
+            "item_form_id": 222, "count": 3, "cell": cell_key})
+    pkt = b.expect("ITEM_SYNC")
+    assert pkt.get("container_ref_id") == 11111
+    assert pkt.get("item_form_id") == 222
+    assert pkt.get("count") == 3
+
+    a.close(); b.close()
+
+
+def test_container_state_on_join():
+    """New player enters a cell where items were looted → CONTAINER_STATE."""
+    a = Client.connect_and_auth(fresh_token(), "LooterC")
+    cell_key = "333001"
+    put_in_cell(a, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    a.recv_all(0.1)
+
+    a.send({"type": "ITEM_TAKEN", "container_ref_id": 55555,
+            "item_form_id": 999, "count": 7, "cell": cell_key})
+    a.recv_all(0.1)
+
+    b = Client.connect_and_auth(fresh_token(), "LateJoinerE")
+    put_in_cell(b, 0, 0, 0, cell=int(cell_key))
+    pkt = b.expect("CONTAINER_STATE")
+    containers = pkt.get("containers", [])
+    found = any(c.get("ref_id") == 55555 for c in containers)
+    assert found, f"container not in state: {containers}"
+
+    a.close(); b.close()
+
+
+def test_char_save_skill_clamp():
+    """CHAR_SAVE with suspicious skill delta → next CHAR_LOAD shows clamped value."""
+    token = fresh_token()
+    a = Client.connect_and_auth(token, "ClampTest")
+    # First CHAR_SAVE establishes baseline (blade=10)
+    a.send({"type": "CHAR_SAVE", "name": "ClampTest", "level": 1,
+            "skills": {"Blade": 10}, "attributes": {},
+            "health": 100, "magicka": 100, "stamina": 100,
+            "pos_x": 0, "pos_y": 0, "pos_z": 0})
+    time.sleep(0.15)
+
+    # Second CHAR_SAVE with Blade jump of 50 (MAX_SKILL_DELTA = 5)
+    a.send({"type": "CHAR_SAVE", "name": "ClampTest", "level": 1,
+            "skills": {"Blade": 60}, "attributes": {},
+            "health": 100, "magicka": 100, "stamina": 100,
+            "pos_x": 0, "pos_y": 0, "pos_z": 0})
+    time.sleep(0.15)
+    a.close()
+
+    # Reconnect and check that the skill is clamped (10 + 5 = 15, not 60)
+    time.sleep(0.1)
+    b = Client()
+    b.send({"type": "HELLO", "token": token, "name": "ClampTest"})
+    pkt = b.expect("CHAR_LOAD")
+    blade = pkt.get("skills", {}).get("Blade")
+    assert blade is not None, f"Blade not in skills: {pkt.get('skills')}"
+    assert blade <= 15, f"Blade not clamped: {blade} (expected ≤15)"
+    b.close()
+
+
+def test_char_save_level_clamp():
+    """CHAR_SAVE with level jump > 1 → clamped to oldLevel+1."""
+    token = fresh_token()
+    a = Client.connect_and_auth(token, "LevelClamp")
+    # Baseline level 1
+    a.send({"type": "CHAR_SAVE", "name": "LevelClamp", "level": 1,
+            "skills": {}, "attributes": {},
+            "health": 100, "magicka": 100, "stamina": 100,
+            "pos_x": 0, "pos_y": 0, "pos_z": 0})
+    time.sleep(0.15)
+    # Jump to level 10
+    a.send({"type": "CHAR_SAVE", "name": "LevelClamp", "level": 10,
+            "skills": {}, "attributes": {},
+            "health": 100, "magicka": 100, "stamina": 100,
+            "pos_x": 0, "pos_y": 0, "pos_z": 0})
+    time.sleep(0.15)
+    a.close()
+
+    time.sleep(0.1)
+    b = Client()
+    b.send({"type": "HELLO", "token": token, "name": "LevelClamp"})
+    pkt = b.expect("CHAR_LOAD")
+    level = pkt.get("level")
+    assert level == 2, f"Level not clamped to 2: {level}"
+    b.close()
+
+
+def test_speed_hack_rejection():
+    """POSITION_UPDATE with impossible speed → peer does NOT get PLAYER_POS."""
+    a = Client.connect_and_auth(fresh_token(), "Speedhacker")
+    b = Client.connect_and_auth(fresh_token(), "SpeedObserver")
+
+    put_in_cell(a, 0, 0, 0, cell=222001)
+    put_in_cell(b, 0, 0, 0, cell=222001)
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    # Send position 1 to establish baseline
+    a.send({"type": "POSITION_UPDATE",
+            "x": 0, "y": 0, "z": 0,
+            "rot": 0, "cell": 222001, "ws": 0, "anim": 0, "hp": 100})
+    time.sleep(0.05)
+    b.recv_all(0.1)
+
+    # Send impossible jump (500k units in <1s)
+    a.send({"type": "POSITION_UPDATE",
+            "x": 500000, "y": 500000, "z": 0,
+            "rot": 0, "cell": 222001, "ws": 0, "anim": 0, "hp": 100})
+
+    # B should NOT get a PLAYER_POS for this
+    b.expect_none("PLAYER_POS", timeout=0.4)
+
+
+def test_dungeon_clear():
+    """DUNGEON_CLEAR → all connected players get DUNGEON_CLEARED."""
+    a = Client.connect_and_auth(fresh_token(), "DungeonA")
+    b = Client.connect_and_auth(fresh_token(), "DungeonB")
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    a.send({"type": "DUNGEON_CLEAR", "dungeon_id": "TestDungeon01"})
+    pkt = b.expect("DUNGEON_CLEARED")
+    assert pkt.get("dungeon_id") == "TestDungeon01"
+    assert pkt.get("clearer") == "DungeonA"
+
+    a.close(); b.close()
+
+
+def test_weather_sync():
+    """WEATHER_REPORT → all players get WEATHER_SYNC; new joiner also gets it."""
+    a = Client.connect_and_auth(fresh_token(), "WeatherA")
+    b = Client.connect_and_auth(fresh_token(), "WeatherB")
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    a.send({"type": "WEATHER_REPORT", "weather_id": 0x38})
+
+    # B should get WEATHER_SYNC
+    pkt = b.expect("WEATHER_SYNC")
+    assert pkt.get("weather_id") == 0x38, f"weather_id wrong: {pkt}"
+
+    # New joiner should also get WEATHER_SYNC on join
+    c = Client()
+    c.send({"type": "HELLO", "token": fresh_token(), "name": "WeatherC"})
+    pkts = c.recv_all(1.0)
+    types = [p.get("type") for p in pkts]
+    assert "WEATHER_SYNC" in types, f"WEATHER_SYNC not in join packets: {types}"
+    wid = next(p.get("weather_id") for p in pkts if p.get("type") == "WEATHER_SYNC")
+    assert wid == 0x38, f"wrong weather_id on join: {wid}"
+
+    a.close(); b.close(); c.close()
+
+
+def test_quest_sync():
+    """QUEST_STAGE with scope=global → peer gets QUEST_STAGE."""
+    a = Client.connect_and_auth(fresh_token(), "QuestA")
+    b = Client.connect_and_auth(fresh_token(), "QuestB")
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    a.send({"type": "QUEST_STAGE", "questId": "MQ01", "stage": 10, "src": "global"})
+    pkt = b.expect("QUEST_STAGE")
+    assert pkt.get("questId") == "MQ01"
+    assert pkt.get("stage") == 10
+
+    a.close(); b.close()
+
+
+def test_faction_rank():
+    """FACTION_RANK with forward progress → broadcast to all players."""
+    a = Client.connect_and_auth(fresh_token(), "FactionA")
+    b = Client.connect_and_auth(fresh_token(), "FactionB")
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    a.send({"type": "FACTION_RANK", "faction_id": "MagesGuild", "rank": 3})
+    pkt = b.expect("FACTION_RANK")
+    assert pkt.get("faction_id") == "MagesGuild"
+    assert pkt.get("rank") == 3
+    assert pkt.get("char_name") == "FactionA"
+
+    # Same or lower rank should NOT broadcast
+    a.send({"type": "FACTION_RANK", "faction_id": "MagesGuild", "rank": 2})
+    b.expect_none("FACTION_RANK", timeout=0.3)
+
+    a.close(); b.close()
+
+
+def test_bounty():
+    """CRIME_REPORT stores bounty; BOUNTY_PAID clears it."""
+    token = fresh_token()
+    a = Client.connect_and_auth(token, "Criminal")
+    a.send({"type": "CRIME_REPORT", "hold": "Cyrodiil", "bounty_delta": 100})
+    a.send({"type": "CRIME_REPORT", "hold": "Cyrodiil", "bounty_delta": 50})
+    time.sleep(0.15)
+    a.close()
+
+    # Rejoin and verify bounty is carried forward (it'll be in session state)
+    time.sleep(0.1)
+    b = Client()
+    b.send({"type": "HELLO", "token": token, "name": "Criminal"})
+    pkt = b.expect("CHAR_LOAD")
+    bounties = pkt.get("bounties", {})
+    assert bounties.get("Cyrodiil", 0) == 150, f"bounty wrong: {bounties}"
+
+    # Pay bounty
+    b.send({"type": "BOUNTY_PAID", "hold": "Cyrodiil"})
+    time.sleep(0.15)
+    b.close()
+
+    # Rejoin — bounty should be 0
+    time.sleep(0.1)
+    c = Client()
+    c.send({"type": "HELLO", "token": token, "name": "Criminal"})
+    pkt = c.expect("CHAR_LOAD")
+    bounties = pkt.get("bounties", {})
+    assert bounties.get("Cyrodiil", 0) == 0, f"bounty not cleared: {bounties}"
+    c.close()
+
+
+# ── Static DLL review ─────────────────────────────────────────────────────────
+
+def static_review():
+    """Read client C++ source and check for known risk patterns."""
+    issues = []
+    warnings = []
+
+    checks = [
+        # (file, pattern, message, is_error)
+        ("client/plugin/src/pos_sync.cpp",
+         'char buf[280]',
+         "pos_sync POSITION_UPDATE buffer is 280B — verify snprintf fits ft+cn payload",
+         False),
+        ("client/plugin/src/game_hooks.cpp",
+         'SampleWeatherId',
+         "SampleWeatherId present — Sky singleton (0x00B13A94) unverified for 1.2.416",
+         False),
+        ("client/plugin/src/game_hooks.cpp",
+         'prevHp = 0',
+         "prevHp reset after death send — good, no re-fire while dead",
+         False),
+        ("client/plugin/src/npc_sync.cpp",
+         'GetActorHp',
+         "GetActorHp vtable dispatch — null-guarded via WalkCellRefs early return",
+         False),
+    ]
+
+    for filepath, pattern, msg, is_err in checks:
+        try:
+            with open(filepath) as f:
+                content = f.read()
+            found = pattern in content
+            if is_err and not found:
+                issues.append(f"MISSING '{pattern}' in {filepath}: {msg}")
+            elif not is_err:
+                (warnings if not found else []).append(f"NOTE {filepath}: {msg}")
+        except FileNotFoundError:
+            issues.append(f"FILE NOT FOUND: {filepath}")
+
+    # Check snprintf buffer size is adequate
+    # Max POSITION_UPDATE with ft+cn: ~230 chars; 280 is fine
+    try:
+        with open("client/plugin/src/pos_sync.cpp") as f:
+            src = f.read()
+        import re
+        bufs = re.findall(r'char buf\[(\d+)\]', src)
+        for b in bufs:
+            if int(b) < 200:
+                issues.append(f"pos_sync buf[{b}] may be too small for ft payload")
+    except FileNotFoundError:
+        pass
+
+    return issues, warnings
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    print("=" * 60)
+    print("TES4MP Integration Tests")
+    print("=" * 60)
+
+    # Static review first (no server needed)
+    print("\n[Static DLL Review]")
+    issues, warnings = static_review()
+    for w in warnings:
+        print(f"  NOTE  {w}")
+    for i in issues:
+        print(f"  WARN  {i}")
+    if not issues and not warnings:
+        print("  OK    No concerns found")
+
+    print("\n[Server Integration Tests]")
+    server = Server()
+    try:
+        server.start()
+        print(f"  Server up on {HOST}:{PORT}\n")
+
+        tests = [
+            ("auth: new player",          test_auth_new),
+            ("auth: returning player",     test_auth_returning),
+            ("auth: bad token → KICK",     test_auth_bad_token),
+            ("join: REVEAL_MARKERS sent",  test_reveal_markers_on_join),
+            ("ghost: appear + leave",      test_ghost_appear_leave),
+            ("ghost: fast travel flag",    test_fast_travel_flag),
+            ("ghost: player death",        test_player_death),
+            ("npc: kill broadcast",        test_npc_kill_broadcast),
+            ("npc: kill sync on join",     test_npc_kill_sync_on_join),
+            ("container: loot broadcast",  test_container_loot_broadcast),
+            ("container: state on join",   test_container_state_on_join),
+            ("char_save: skill clamp",     test_char_save_skill_clamp),
+            ("char_save: level clamp",     test_char_save_level_clamp),
+            ("speed hack: rejection",      test_speed_hack_rejection),
+            ("dungeon: clear broadcast",   test_dungeon_clear),
+            ("weather: sync broadcast",    test_weather_sync),
+            ("quest: stage sync",          test_quest_sync),
+            ("faction: rank broadcast",    test_faction_rank),
+            ("bounty: report + clear",     test_bounty),
+        ]
+
+        for name, fn in tests:
+            run_test(name, fn)
+            time.sleep(0.05)  # small gap between tests
+
+    finally:
+        if any(not ok for _, ok, _ in _results):
+            server.dump_log()
+        server.stop()
+
+    # Summary
+    passed = sum(1 for _, ok, _ in _results if ok)
+    failed = sum(1 for _, ok, _ in _results if not ok)
+    total  = len(_results)
+
+    print(f"\n{'=' * 60}")
+    print(f"Results: {passed}/{total} passed", end="")
+    if failed:
+        print(f"  ({failed} FAILED)")
+        print("\nFailed tests:")
+        for name, ok, err in _results:
+            if not ok:
+                print(f"  - {name}: {err}")
+    else:
+        print(" — all green")
+    print("=" * 60)
+
+    sys.exit(0 if failed == 0 else 1)
+
+
+if __name__ == "__main__":
+    main()

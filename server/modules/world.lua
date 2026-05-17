@@ -28,8 +28,10 @@ local function cellKey(pkt, x, y)
     local ws = tonumber(pkt.ws) or 0
     if ws == 0 then
         -- Interior: use exact cell formID. Treat formID 0 as "no cell".
-        local fid = tonumber(pkt.cell) or 0
-        return fid ~= 0 and tostring(fid) or ""
+        -- Use integer formatting: cjson returns numbers as floats, and tostring(666001.0)
+        -- produces "666001.0" in Lua 5.3+ — we need "666001" to match string cell keys.
+        local fid = math.floor(tonumber(pkt.cell) or 0)
+        return fid ~= 0 and ("%d"):format(fid) or ""
     else
         -- Exterior: bucket into zone grid so adjacent cells share a key.
         local gx = math.floor(x / EXTERIOR_ZONE)
@@ -50,9 +52,11 @@ function M.handlePositionUpdate(char_id, pkt)
     local now  = socket.gettime()
     local cell = cellKey(pkt, x, y)
 
-    -- Speed validation (horizontal distance only — ignore Z for jumps/ledges)
+    -- Speed validation (horizontal distance only — ignore Z for jumps/ledges).
+    -- Fast travel (ft=1) is exempt: the client teleports, so the distance is expected.
+    local isFastTravel = tonumber(pkt.ft) == 1
     local last = session.getPosCache(char_id)
-    if last and last.t > 0 then
+    if not isFastTravel and last and last.t > 0 then
         local dt = now - last.t
         if dt > 0 then
             local dist  = math.sqrt((x - last.x)^2 + (y - last.y)^2)
@@ -359,6 +363,7 @@ end
 -- ── Player death ─────────────────────────────────────────────────────────────
 
 function M.handlePlayerDied(char_id, pkt)
+    local json = require("cjson")
     local sess = session.getByCharId(char_id)
     if not sess or not sess.cell or sess.cell == "" then return end
     session.broadcastToCell(sess.cell,
@@ -368,6 +373,7 @@ end
 -- ── Weather sync ──────────────────────────────────────────────────────────────
 
 function M.handleWeatherReport(char_id, pkt)
+    local json = require("cjson")
     local wid = tonumber(pkt.weather_id) or 0
     if wid == 0 or wid == currentWeather then return end
     currentWeather = wid
@@ -378,6 +384,7 @@ end
 -- ── NPC kill sync ─────────────────────────────────────────────────────────────
 
 function M.handleNpcKilled(char_id, pkt)
+    local json   = require("cjson")
     local ref_id = tonumber(pkt.ref_id) or 0
     local cell   = tostring(pkt.cell or "")
     if ref_id == 0 or cell == "" then return end
@@ -397,6 +404,7 @@ end
 -- ── Container loot sync ───────────────────────────────────────────────────────
 
 function M.handleItemTaken(char_id, pkt)
+    local json  = require("cjson")
     local cref  = tonumber(pkt.container_ref_id) or 0
     local iform = tonumber(pkt.item_form_id) or 0
     local count = tonumber(pkt.count) or 0

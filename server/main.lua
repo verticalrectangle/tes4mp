@@ -21,7 +21,8 @@ local function loadJSON(path)
     return json.decode(data)
 end
 
-local config      = loadJSON("server/config.json")
+local configPath  = (arg and arg[1] and arg[1]:match("%.json$")) and arg[1] or "server/config.json"
+local config      = loadJSON(configPath)
 local questConfig = loadJSON("server/data/quests.json")
 
 config.port        = math.floor(config.port)

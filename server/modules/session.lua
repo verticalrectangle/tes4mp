@@ -53,6 +53,7 @@ local function buildCharLoad(char, is_new)
     local attrs  = store.getCharacterAttributes(cid)
     local vitals = store.getCharacterVitals(cid) or {}
     local json   = require("cjson")
+    local bounties = store.getBounties(cid)
     local pkt = json.encode({
         type       = "CHAR_LOAD",
         is_new     = is_new or false,
@@ -71,6 +72,7 @@ local function buildCharLoad(char, is_new)
         fame       = tonumber(vitals.fame)    or 0,
         infamy     = tonumber(vitals.infamy)  or 0,
         gold       = tonumber(vitals.gold)    or 100,
+        bounties   = bounties,
         -- Tutorial skip — sent on every login until server marks it complete
         start_cell        = (tonumber(char.tutorial_complete) or 0) == 0 and "ImperialSewers03"    or nil,
         start_quest       = (tonumber(char.tutorial_complete) or 0) == 0 and "MQ01"               or nil,
