@@ -18,7 +18,7 @@ void GhostSystem_OnAppear(const std::string& charId, const std::string& charName
                           float x, float y, float z, float rotZ, int animGroup);
 void GhostSystem_OnLeave(const std::string& charId);
 void GhostSystem_OnPosUpdate(const std::string& charId,
-                             float x, float y, float z, float rotZ, int animGroup);
+                             float x, float y, float z, float rotZ, int animGroup, int hp);
 
 // Called from D3D9 Present hook every rendered frame — game thread.
 // Interpolates positions and writes them to TESObjectREFR memory.

@@ -107,7 +107,8 @@ function M.handlePositionUpdate(char_id, pkt)
     if cell ~= "" then
         session.broadcastToCell(cell,
             json.encode({ type = "PLAYER_POS", char_id = tostring(char_id),
-                          x = x, y = y, z = z, rot = rot, anim = anim }),
+                          x = x, y = y, z = z, rot = rot, anim = anim,
+                          hp = tonumber(pkt.hp) or 0 }),
             char_id)
     end
 end

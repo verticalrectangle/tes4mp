@@ -129,6 +129,9 @@ static void SetNetEvent(NetEvent e) {
     g_netEvent = e;
 }
 
+static std::atomic<int> g_playerHp{0};
+int GameHooks_GetPlayerHp() { return g_playerHp.load(); }
+
 // Not used for button-polling anymore, kept for scriptfuncs.cpp compatibility.
 static std::atomic<int> g_buttonResult{-2};
 void GameHooks_SetButtonResult(int v) { g_buttonResult.store(v); }
@@ -190,6 +193,7 @@ static bool ReadAndSendCharSave() {
     float posY    = *(float*)((char*)player + 0x030);
     float posZ    = *(float*)((char*)player + 0x034);
     int   health  = (int)getAV(player, nullptr, 8);
+    g_playerHp.store(health);
     int   magicka = (int)getAV(player, nullptr, 9);
     int   stamina = (int)getAV(player, nullptr, 10);
 
@@ -432,7 +436,7 @@ static void PollLoop() {
                 GhostSystem_OnPosUpdate(
                     pkt.strField,
                     JF(pkt.raw, "x"), JF(pkt.raw, "y"), JF(pkt.raw, "z"),
-                    JF(pkt.raw, "rot"), (int)JF(pkt.raw, "anim"));
+                    JF(pkt.raw, "rot"), (int)JF(pkt.raw, "anim"), (int)JF(pkt.raw, "hp"));
                 break;
 
             case PacketType::GhostAppear: {

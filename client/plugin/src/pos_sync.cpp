@@ -1,6 +1,7 @@
 #include "pos_sync.h"
 #include "oblivion_internal.h"
 #include "network.h"
+#include "game_hooks.h"
 #include <windows.h>
 #include <atomic>
 #include <thread>
@@ -119,13 +120,14 @@ static void PollThread() {
                         || now.cellFormID != last.cellFormID
                         || now.worldspaceFormID != last.worldspaceFormID
                         || anim != lastAnim) {
-                    char buf[192];
+                    char buf[208];
                     snprintf(buf, sizeof(buf),
                         "{\"type\":\"POSITION_UPDATE\","
                         "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
-                        "\"rot\":%.4f,\"cell\":%u,\"ws\":%u,\"anim\":%d}",
+                        "\"rot\":%.4f,\"cell\":%u,\"ws\":%u,\"anim\":%d,\"hp\":%d}",
                         now.x, now.y, now.z, now.rotZ,
-                        now.cellFormID, now.worldspaceFormID, anim);
+                        now.cellFormID, now.worldspaceFormID, anim,
+                        GameHooks_GetPlayerHp());
                     g_network.send(buf);
                     last     = now;
                     lastMs   = nowMs;

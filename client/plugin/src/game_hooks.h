@@ -23,3 +23,6 @@ void GameHooks_Shutdown();
 // Used by ghost_system and other subsystems from any thread.
 void GameHooks_EnqueueCmd(const char* cmd);
 
+// Returns the player's current raw HP (from the last CHAR_SAVE checkpoint, 0 if unknown).
+int GameHooks_GetPlayerHp();
+

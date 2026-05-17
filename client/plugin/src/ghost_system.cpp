@@ -82,6 +82,7 @@ struct Ghost {
 
     int         animGroup   = 0;
     int         appliedAnim = -1;
+    int         hp          = 999;
 
     DWORD       phaseReadyMs = 0;  // earliest time to start scanning
     DWORD       spawnedMs    = 0;  // when last PlaceAtMe was enqueued (for timeout)
@@ -101,6 +102,7 @@ struct Evt {
     int         gender;
     float       x, y, z, rotZ;
     int         animGroup;
+    int         hp;
 };
 
 static std::queue<Evt> g_evtQ;
@@ -220,6 +222,15 @@ static void* FindUnclaimedRefInCell(uint32_t baseFormId) {
     return newest;
 }
 
+// ── Health-in-name ────────────────────────────────────────────────────────────
+
+static std::string NameWithHp(const std::string& name, int hp) {
+    if (hp <= 10) return name + " (DYING)";
+    if (hp <= 25) return name + " (!!)";
+    if (hp <= 75) return name + " (!)";
+    return name;
+}
+
 // ── Process events (game thread) ──────────────────────────────────────────────
 
 static void DrainEvents() {
@@ -291,6 +302,18 @@ static void DrainEvents() {
             Ghost& gh = it->second;
             PushSnap(gh, ev.x, ev.y, ev.z, ev.rotZ);
             gh.animGroup = ev.animGroup;
+            if (std::abs(ev.hp - gh.hp) > 5) {
+                gh.hp = ev.hp;
+                if (gh.phase == Phase::Active && gh.slot >= 0 && g_slotRefs[gh.slot]) {
+                    uint32_t fid = *(uint32_t*)((char*)g_slotRefs[gh.slot] + Oblivion::kForm_refID);
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "prid %08X", fid);
+                    EnqCmd(buf);
+                    std::string newName = NameWithHp(gh.name, gh.hp);
+                    snprintf(buf, sizeof(buf), "SetName \"%s\"", newName.c_str());
+                    EnqCmd(buf);
+                }
+            }
             break;
         }
 
@@ -332,9 +355,10 @@ static void TickGhosts() {
             EnqCmd(buf);
             EnqCmd("setrestrained 1");  // freeze AI so position writes stick
 
-            // Apply player name (OBSE SetName — per-ref, doesn't affect base form)
+            // Apply player name with HP indicator (OBSE SetName — per-ref, doesn't affect base form)
             if (!gh.name.empty()) {
-                snprintf(buf, sizeof(buf), "SetName \"%s\"", gh.name.c_str());
+                std::string nameStr = NameWithHp(gh.name, gh.hp);
+                snprintf(buf, sizeof(buf), "SetName \"%s\"", nameStr.c_str());
                 EnqCmd(buf);
             }
 
@@ -345,6 +369,11 @@ static void TickGhosts() {
                     snprintf(buf, sizeof(buf), "setrace %s", raceEd);
                     EnqCmd(buf);
                 }
+            }
+
+            // Guard base (0x1C34F) is male — toggle sex for female remote players.
+            if (gh.gender == 1) {
+                EnqCmd("SexChange");
             }
 
             GS_DBG("spawned ghost charId=" + charId
@@ -408,17 +437,17 @@ void GhostSystem_OnAppear(const std::string& charId, const std::string& charName
                           uint32_t raceFormId, int gender,
                           float x, float y, float z, float rotZ, int animGroup)
 {
-    PushEvt({ EvtType::Appear, charId, charName, raceFormId, gender, x, y, z, rotZ, animGroup });
+    PushEvt({ EvtType::Appear, charId, charName, raceFormId, gender, x, y, z, rotZ, animGroup, 999 });
 }
 
 void GhostSystem_OnLeave(const std::string& charId) {
-    PushEvt({ EvtType::Leave, charId, {}, 0, 0, 0, 0, 0, 0, 0 });
+    PushEvt({ EvtType::Leave, charId, {}, 0, 0, 0, 0, 0, 0, 0, 0 });
 }
 
 void GhostSystem_OnPosUpdate(const std::string& charId,
-                             float x, float y, float z, float rotZ, int animGroup)
+                             float x, float y, float z, float rotZ, int animGroup, int hp)
 {
-    PushEvt({ EvtType::PosUpdate, charId, {}, 0, 0, x, y, z, rotZ, animGroup });
+    PushEvt({ EvtType::PosUpdate, charId, {}, 0, 0, x, y, z, rotZ, animGroup, hp });
 }
 
 void GhostSystem_OnFrame() {
