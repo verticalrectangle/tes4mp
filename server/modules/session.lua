@@ -72,7 +72,7 @@ local function buildCharLoad(char, is_new)
         infamy     = tonumber(vitals.infamy)  or 0,
         gold       = tonumber(vitals.gold)    or 100,
         -- Tutorial skip — sent on every login until server marks it complete
-        start_cell        = (tonumber(char.tutorial_complete) or 0) == 0 and "ICPrisonSewerExit01" or nil,
+        start_cell        = (tonumber(char.tutorial_complete) or 0) == 0 and "ImperialSewers03"    or nil,
         start_quest       = (tonumber(char.tutorial_complete) or 0) == 0 and "MQ01"               or nil,
         start_quest_stage = (tonumber(char.tutorial_complete) or 0) == 0 and 90                   or nil,
     })
