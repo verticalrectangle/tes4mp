@@ -144,45 +144,51 @@ if [[ "$(uname -s)" == "Linux" ]]; then
     if [[ ! -f "$LOADER" ]]; then
         yellow "obse_loader.exe not found — skipping patches"
     else
-        PATCH_RESULT="$(python3 - "$LOADER" <<'PYEOF'
-import sys, shutil, os
+        PATCHER="$(mktemp /tmp/obse_patch.XXXXXX.py)"
+        cat > "$PATCHER" << 'PYEOF'
+import sys, shutil
 
 path = sys.argv[1]
 data = bytearray(open(path, 'rb').read())
 
-# Pattern immediately before the Steam ownership JNZ:
-#   b0 01          MOV AL, 1
-#   88 44 24 13    MOV [ESP+13h], AL
-#   75 ??          JNZ <fail>   ← we NOP this
+# Anchor: b0 01 88 44 24 13 — MOV AL,1 / MOV [ESP+13h],AL
+# The Steam ownership JNZ (75 XX) or JZ (74 XX) follows within 8 bytes.
 pat = bytes([0xb0, 0x01, 0x88, 0x44, 0x24, 0x13])
 idx = data.find(pat)
 if idx == -1:
     print("NOTFOUND")
     sys.exit(0)
 
-jnz_off = idx + len(pat)
-if data[jnz_off] == 0x90:
-    print("ALREADY")
-    sys.exit(0)
+# Scan ahead up to 8 bytes for a short conditional jump
+jnz_off = None
+for off in range(idx + len(pat), idx + len(pat) + 8):
+    if data[off] in (0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b,
+                     0x7c, 0x7d, 0x7e, 0x7f, 0x70, 0x71, 0x72, 0x73):
+        jnz_off = off
+        break
 
-if data[jnz_off] != 0x75:
-    print(f"UNEXPECTED {data[jnz_off]:02x} at {jnz_off:#x}")
+if jnz_off is None:
+    # Check if already patched (NOPs in that region)
+    region = data[idx + len(pat): idx + len(pat) + 8]
+    if all(b == 0x90 for b in region[:2]):
+        print("ALREADY")
+    else:
+        print("NOTFOUND")
     sys.exit(0)
 
 shutil.copy2(path, path + ".bak")
-data[jnz_off]     = 0x90  # NOP the JNZ opcode
-data[jnz_off + 1] = 0x90  # NOP the offset byte
+data[jnz_off]     = 0x90
+data[jnz_off + 1] = 0x90
 open(path, 'wb').write(data)
-print(f"PATCHED {jnz_off:#x}")
+print("PATCHED " + hex(jnz_off))
 PYEOF
-)"
+        PATCH_RESULT="$(python3 "$PATCHER" "$LOADER")"
+        rm -f "$PATCHER"
         case "$PATCH_RESULT" in
             PATCHED*)  green "  obse_loader.exe patched at ${PATCH_RESULT#PATCHED } (Steam check NOP'd)" ;;
             ALREADY)   green "  obse_loader.exe already patched — skipping" ;;
-            NOTFOUND)  yellow "  obse_loader.exe: Steam check pattern not found — skipping patch" ;;
-            *)         yellow "  obse_loader.exe: $PATCH_RESULT — skipping patch" ;;
+            *)         yellow "  obse_loader.exe: Steam check pattern not found — skipping patch" ;;
         esac
-    fi
 
         if [[ ! -f "$LAUNCHER" ]]; then
             yellow "  OblivionLauncher.exe not found — skipping launcher patch"
