@@ -35,12 +35,6 @@ static std::mutex              g_cmdMutex;
 static std::atomic<bool>       g_running{false};
 static std::thread             g_pollThread;
 
-// ── Chat overlay ring buffer ───────────────────────────────────────────────────
-static constexpr int CHAT_LINES = 8;
-static std::string       g_chatLines[CHAT_LINES];
-static std::mutex        g_chatMutex;
-static std::atomic<bool> g_chatDirty{false};
-static std::atomic<bool> g_chatVisible{false};
 
 // ── Ghost NPC system ──────────────────────────────────────────────────────────
 // Ghost NPC template FormID — discovered automatically at runtime by scanning
@@ -134,26 +128,6 @@ static std::string SanitiseForCmd(const std::string& s, size_t maxLen = 200) {
     return out;
 }
 
-// Push a message into the chat overlay ring buffer.
-// Before login (overlay hidden) also shows via the HUD Message notification.
-// Thread-safe: may be called from PollLoop.
-static void ChatPush(const std::string& msg) {
-    if (msg.empty()) return;
-    {
-        std::lock_guard<std::mutex> lk(g_chatMutex);
-        for (int i = 0; i < CHAT_LINES - 1; ++i)
-            g_chatLines[i] = g_chatLines[i + 1];
-        g_chatLines[CHAT_LINES - 1] = msg;
-    }
-    g_chatDirty = true;
-
-    if (!g_chatVisible) {
-        // Overlay not open yet — fall back to the HUD notification system.
-        EnqueueCmd("Message \"" + SanitiseForCmd(msg) + "\"");
-    }
-}
-
-// Auth-phase helper: plain HUD notification (never goes to the chat overlay).
 static void EnqueueMsg(const std::string& msg) {
     static const size_t MAX_LINES = 10;
 
@@ -626,7 +600,7 @@ static void PollLoop() {
             case PacketType::GiveItem: {
                 std::ostringstream ss; ss << "player.additem " << pkt.strField << " " << pkt.intField;
                 EnqueueCmd(ss.str());
-                ChatPush("[TES4MP] Received: " + std::to_string(pkt.intField) + "x " + pkt.strField);
+                EnqueueMsg("[TES4MP] Received: " + std::to_string(pkt.intField) + "x " + pkt.strField);
                 break;
             }
             case PacketType::TakeItem: {
@@ -659,28 +633,27 @@ static void PollLoop() {
             case PacketType::CommandResult:
             case PacketType::Message:
             case PacketType::ServerAnnouncement:
-                ChatPush("[TES4MP] " + pkt.strField);
+                EnqueueMsg("[TES4MP] " + pkt.strField);
                 break;
             case PacketType::PrivateMsg:
-                ChatPush("[PM from " + pkt.strField2 + "] " + pkt.strField);
+                EnqueueMsg("[PM from " + pkt.strField2 + "] " + pkt.strField);
                 break;
             case PacketType::DungeonCleared:
-                ChatPush("[TES4MP] " + pkt.strField2 + " cleared " + pkt.strField);
+                EnqueueMsg("[TES4MP] " + pkt.strField2 + " cleared " + pkt.strField);
                 break;
             case PacketType::PlayerJoin:
-                ChatPush("[TES4MP] " + pkt.strField + " joined (" + pkt.strField2 + ")");
+                EnqueueMsg("[TES4MP] " + pkt.strField + " joined (" + pkt.strField2 + ")");
                 break;
             case PacketType::PlayerLeave:
-                ChatPush("[TES4MP] " + pkt.strField + " left");
+                EnqueueMsg("[TES4MP] " + pkt.strField + " left");
                 break;
             case PacketType::PartyInvite:
-                ChatPush("[TES4MP] Party invite from " + pkt.strField +
+                EnqueueMsg("[TES4MP] Party invite from " + pkt.strField +
                          " — type: /party accept " + pkt.strField);
                 break;
             case PacketType::Kick:
-                ChatPush("[TES4MP] Kicked: " + pkt.strField);
+                EnqueueMsg("[TES4MP] Kicked: " + pkt.strField);
                 g_network.disconnect();
-                g_chatVisible = false;
                 g_phase = AuthPhase::Idle;
                 g_ghosts.clear(); // drop ghost state on disconnect
                 PosSync_Stop();
@@ -714,7 +687,7 @@ static void PollLoop() {
                 // Show in chat so we know someone entered our cell
                 std::string name = json::getStr(pkt.raw, "char_name");
                 if (!name.empty())
-                    ChatPush("[TES4MP] " + name + " is nearby.");
+                    EnqueueMsg("[TES4MP] " + name + " is nearby.");
                 break;
             }
 
