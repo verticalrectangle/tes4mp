@@ -65,8 +65,9 @@ local TABLES = {
     pos_x       REAL    NOT NULL DEFAULT 0,
     pos_y       REAL    NOT NULL DEFAULT 0,
     pos_z       REAL    NOT NULL DEFAULT 0,
-    created_at  INTEGER NOT NULL,
-    last_seen   INTEGER NOT NULL
+    created_at        INTEGER NOT NULL,
+    last_seen         INTEGER NOT NULL,
+    tutorial_complete INTEGER NOT NULL DEFAULT 0
 )]],
 [[CREATE TABLE IF NOT EXISTS character_skills (
     char_id INTEGER NOT NULL REFERENCES characters(id),
@@ -212,6 +213,10 @@ function M.createCharByToken(token, name)
     exec(("INSERT INTO character_vitals (char_id,health,magicka,stamina,fame,infamy,gold) VALUES(%d,100,100,100,0,0,100)"):format(cid))
 
     return M.getCharacterById(cid)
+end
+
+function M.setTutorialComplete(char_id)
+    exec(("UPDATE characters SET tutorial_complete=1 WHERE id=%d"):format(tonumber(char_id)))
 end
 
 function M.updateCharacterSeen(char_id)

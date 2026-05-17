@@ -206,6 +206,12 @@ function M.handleCharSave(char_id, pkt)
         end
     end
 
+    -- Mark tutorial complete on first CHAR_SAVE so the skip stops firing
+    if (tonumber(sess.char.tutorial_complete) or 0) == 0 then
+        store.setTutorialComplete(char_id)
+        sess.char.tutorial_complete = 1
+    end
+
     -- Update in-memory cache before the DB write so future checkpoints
     -- compare against the validated values, not the pre-save ones
     session.updateStatCache(char_id, newSkills, newAttrs, newLevel)

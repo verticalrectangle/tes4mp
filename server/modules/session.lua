@@ -71,10 +71,10 @@ local function buildCharLoad(char, is_new)
         fame       = tonumber(vitals.fame)    or 0,
         infamy     = tonumber(vitals.infamy)  or 0,
         gold       = tonumber(vitals.gold)    or 100,
-        -- New character tutorial skip (server-authoritative)
-        start_cell        = is_new and "ICPrisonSewerExit01" or nil,
-        start_quest       = is_new and "MQ01"               or nil,
-        start_quest_stage = is_new and 90                   or nil,
+        -- Tutorial skip — sent on every login until server marks it complete
+        start_cell        = (tonumber(char.tutorial_complete) or 0) == 0 and "ICPrisonSewerExit01" or nil,
+        start_quest       = (tonumber(char.tutorial_complete) or 0) == 0 and "MQ01"               or nil,
+        start_quest_stage = (tonumber(char.tutorial_complete) or 0) == 0 and 90                   or nil,
     })
     return skills, attrs, pkt
 end
