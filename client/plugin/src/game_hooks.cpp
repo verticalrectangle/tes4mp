@@ -573,9 +573,11 @@ static void ApplyCharLoad(const std::string& raw) {
         std::string cell = json::getStr(raw, "cell");
         if (!cell.empty())
             EnqueueCmd("coc \"" + SanitiseForCmd(cell) + "\"");
+    } else {
+        // New character — skip the tutorial and drop them at the sewer exit.
+        EnqueueCmd("setstage MQ01 90");
+        EnqueueCmd("coc ICPrisonSewerExit01");
     }
-    // New character: game already has the right stats from character creation.
-    // The first CHAR_SAVE tick will push them to the server.
 
     std::string name = json::getStr(raw, "name");
     EnqueueCmd("Message \"[TES4MP] Connected as " + SanitiseForCmd(name) + "\"");
