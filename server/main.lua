@@ -121,6 +121,12 @@ local function handlePacket(sock, info, raw)
 
     elseif t == "APPEARANCE" then
         world.handleAppearance(cid, pkt)
+
+    elseif t == "NPC_KILLED" then
+        world.handleNpcKilled(cid, pkt)
+
+    elseif t == "ITEM_TAKEN" then
+        world.handleItemTaken(cid, pkt)
     end
 end
 

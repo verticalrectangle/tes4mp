@@ -16,6 +16,7 @@ add_library(TES4MP SHARED
     src/appearance.cpp
     src/d3d_hook.cpp
     src/ghost_system.cpp
+    src/npc_sync.cpp
 )
 
 target_include_directories(TES4MP PRIVATE

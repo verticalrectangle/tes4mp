@@ -23,8 +23,23 @@ static constexpr ptrdiff_t kRef_niNode     = 0x03C; // NiNode* — confirmed Gam
 static constexpr ptrdiff_t kRef_parentCell = 0x040; // TESObjectCELL* — confirmed
 
 // ── TESForm offsets ───────────────────────────────────────────────────────────
-static constexpr ptrdiff_t kForm_refID  = 0x00C; // UInt32 formID
+static constexpr ptrdiff_t kForm_refID   = 0x00C; // UInt32 formID
+static constexpr ptrdiff_t kForm_typeID  = 0x004; // UInt8 — base form type
 static constexpr uint32_t  kFlag_Disabled = 0x00000800;
+
+// ── TESObjectREFR ExtraDataList ───────────────────────────────────────────────
+// BaseExtraList embedded at ref+0x044; m_data (BSExtraData* head) at +0x004 → ref+0x048
+// presenceBitfield UInt8[0x0C] at +0x008 → ref+0x04C
+static constexpr ptrdiff_t kRef_extraList     = 0x048; // BSExtraData* linked list head
+static constexpr ptrdiff_t kRef_extraPresence = 0x04C; // UInt8[0x0C] presence bitfield
+
+// ── Form type IDs (TESForm::formType, GameForms.h) ───────────────────────────
+static constexpr uint8_t kFormType_Container = 0x17; // CONT
+static constexpr uint8_t kFormType_NPC       = 0x23; // NPC_
+static constexpr uint8_t kFormType_Creature  = 0x24; // CREA
+
+// ── ExtraData type codes (GameBSExtraData.h) ──────────────────────────────────
+static constexpr uint8_t kExtraData_ContainerChanges = 0x1A; // 26 — present when container modified
 
 // ── TESActorBase name (baseForm + 0xA4 = char*) ───────────────────────────────
 static constexpr ptrdiff_t kBase_nameStr = 0xA4;

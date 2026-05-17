@@ -200,6 +200,18 @@ void Network::dispatchLine(const std::string& line) {
     } else if (type == "GHOST_LEAVE") {
         p.type     = PacketType::GhostLeave;
         p.strField = getStr(line, "char_id");
+    } else if (type == "NPC_KILLED") {
+        p.type     = PacketType::NpcKilled;
+        p.intField = (int)getInt(line, "ref_id");
+    } else if (type == "NPC_KILL_SYNC") {
+        p.type = PacketType::NpcKillSync;
+        p.raw  = line;
+    } else if (type == "ITEM_SYNC") {
+        p.type = PacketType::ItemSync;
+        p.raw  = line;
+    } else if (type == "CONTAINER_STATE") {
+        p.type = PacketType::ContainerState;
+        p.raw  = line;
     } else {
         return;
     }

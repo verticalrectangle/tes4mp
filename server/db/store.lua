@@ -141,6 +141,20 @@ local TABLES = {
     char_id  INTEGER PRIMARY KEY REFERENCES characters(id),
     data     TEXT    NOT NULL
 )]],
+[[CREATE TABLE IF NOT EXISTS killed_refs (
+    ref_id     INTEGER PRIMARY KEY,
+    cell_key   TEXT    NOT NULL,
+    killed_by  INTEGER NOT NULL,
+    killed_at  INTEGER NOT NULL,
+    respawn_at INTEGER NOT NULL DEFAULT 0
+)]],
+[[CREATE TABLE IF NOT EXISTS container_items (
+    container_ref_id INTEGER NOT NULL,
+    item_form_id     INTEGER NOT NULL,
+    count_taken      INTEGER NOT NULL DEFAULT 0,
+    cell_key         TEXT    NOT NULL,
+    PRIMARY KEY (container_ref_id, item_form_id)
+)]],
 }
 
 local SKILLS = {
@@ -513,6 +527,54 @@ end
 
 function M.updateCharacterName(char_id, name)
     exec(("UPDATE characters SET name='%s' WHERE id=%d"):format(esc(name), tonumber(char_id)))
+end
+
+-- ── Killed refs ──────────────────────────────────────────────────────────────
+
+function M.setKilledRef(ref_id, cell_key, char_id, respawn_hours)
+    local now      = os.time()
+    local respawn  = (tonumber(respawn_hours) or 0) > 0
+                     and (now + tonumber(respawn_hours) * 3600) or 0
+    exec(("INSERT OR REPLACE INTO killed_refs (ref_id,cell_key,killed_by,killed_at,respawn_at) VALUES(%d,'%s',%d,%d,%d)")
+        :format(tonumber(ref_id), esc(cell_key), tonumber(char_id), now, respawn))
+end
+
+function M.getKilledRefs(cell_key)
+    -- Returns array of ref_id integers still dead in the cell (respawn not due yet).
+    local cur = query(("SELECT ref_id FROM killed_refs WHERE cell_key='%s' AND (respawn_at=0 OR respawn_at>%d)")
+        :format(esc(cell_key), os.time()))
+    local refs = {}
+    local row = cur:fetch({}, "n")
+    while row and row[1] do
+        refs[#refs + 1] = tonumber(row[1])
+        row = cur:fetch({}, "n")
+    end
+    cur:close()
+    return refs
+end
+
+-- ── Container items ───────────────────────────────────────────────────────────
+
+function M.recordItemTaken(container_ref_id, item_form_id, count, cell_key)
+    exec(("INSERT INTO container_items (container_ref_id,item_form_id,count_taken,cell_key) VALUES(%d,%d,%d,'%s') ON CONFLICT(container_ref_id,item_form_id) DO UPDATE SET count_taken=count_taken+%d,cell_key='%s'")
+        :format(tonumber(container_ref_id), tonumber(item_form_id), tonumber(count), esc(cell_key),
+                tonumber(count), esc(cell_key)))
+end
+
+function M.getContainerState(cell_key)
+    -- Returns array of {ref_id, form_id, count} for all looted containers in the cell.
+    local cur = query(("SELECT container_ref_id,item_form_id,count_taken FROM container_items WHERE cell_key='%s'")
+        :format(esc(cell_key)))
+    local rows = fetchAll(cur)
+    local result = {}
+    for _, r in ipairs(rows) do
+        result[#result + 1] = {
+            ref_id  = tonumber(r.container_ref_id),
+            form_id = tonumber(r.item_form_id),
+            count   = tonumber(r.count_taken),
+        }
+    end
+    return result
 end
 
 -- ── Audit log ─────────────────────────────────────────────────────────────────

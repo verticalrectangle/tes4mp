@@ -8,5 +8,6 @@
   "motd": "Welcome to TES4MP. Type /help for commands.",
   "max_chars": 3,
   "session_expiry_hours": 24,
-  "dungeon_cooldown_hours": 0
+  "dungeon_cooldown_hours": 0,
+  "npc_respawn_hours": 0
 }

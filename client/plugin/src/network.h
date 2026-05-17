@@ -50,6 +50,10 @@ enum class PacketType : int {
     PlayerPos       = 30,  // another player's position (char_id + x,y,z,rot in raw)
     GhostAppear     = 31,  // another player entered our cell (char_id + appearance in raw)
     GhostLeave      = 32,  // another player left our cell (char_id in strField)
+    NpcKilled       = 33,  // server confirms NPC death — ref_id in intField
+    NpcKillSync     = 34,  // cell-entry kill list — ref_id array in raw
+    ItemSync        = 35,  // server broadcasts ITEM_TAKEN — raw JSON
+    ContainerState  = 36,  // cell-entry container state — raw JSON
 };
 
 struct Packet {

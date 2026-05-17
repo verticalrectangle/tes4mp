@@ -23,3 +23,7 @@ void GhostSystem_OnPosUpdate(const std::string& charId,
 // Called from D3D9 Present hook every rendered frame — game thread.
 // Interpolates positions and writes them to TESObjectREFR memory.
 void GhostSystem_OnFrame();
+
+// Returns true if formId belongs to a ghost ref spawned by this system.
+// Used by npc_sync to skip scanning ghost actors.
+bool GhostSystem_IsGhostRef(uint32_t formId);

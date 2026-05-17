@@ -1,5 +1,6 @@
 #include "game_hooks.h"
 #include "ghost_system.h"
+#include "npc_sync.h"
 #include "d3d_hook.h"
 #include "network.h"
 #include "config.h"
@@ -10,6 +11,8 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <string>
+#include <vector>
+#include <cmath>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -465,6 +468,89 @@ static void PollLoop() {
                 GhostSystem_OnLeave(pkt.strField);
                 break;
 
+            case PacketType::NpcKilled:
+                NpcSync_OnKilled((uint32_t)pkt.intField);
+                break;
+
+            case PacketType::NpcKillSync: {
+                // raw = {"type":"NPC_KILL_SYNC","refs":[refId,...]}
+                // Parse array manually (avoid pulling in a full JSON lib on game thread)
+                std::vector<uint32_t> refs;
+                const std::string& r = pkt.raw;
+                size_t p = r.find("\"refs\"");
+                if (p != std::string::npos) {
+                    size_t lb = r.find('[', p);
+                    size_t rb = r.find(']', lb != std::string::npos ? lb : 0);
+                    if (lb != std::string::npos && rb != std::string::npos) {
+                        std::string arr = r.substr(lb + 1, rb - lb - 1);
+                        size_t i = 0;
+                        while (i < arr.size()) {
+                            while (i < arr.size() && (arr[i] == ' ' || arr[i] == ',')) ++i;
+                            if (i >= arr.size()) break;
+                            char* end;
+                            long v = strtol(arr.c_str() + i, &end, 10);
+                            if (end == arr.c_str() + i) break;
+                            refs.push_back((uint32_t)v);
+                            i = (size_t)(end - arr.c_str());
+                        }
+                    }
+                }
+                if (!refs.empty())
+                    NpcSync_OnKillSync(refs.data(), (int)refs.size());
+                break;
+            }
+
+            case PacketType::ItemSync: {
+                auto cref  = (uint32_t)(int)JF(pkt.raw, "container_ref_id");
+                auto iform = (uint32_t)(int)JF(pkt.raw, "item_form_id");
+                auto cnt   = (int)JF(pkt.raw, "count");
+                if (cref && iform && cnt > 0)
+                    NpcSync_OnItemSync(cref, iform, cnt);
+                break;
+            }
+
+            case PacketType::ContainerState: {
+                // raw = {"type":"CONTAINER_STATE","containers":[{"ref_id":N,"items":[{"form_id":M,"count":K}]}]}
+                // Simple linear scan — containers are few per cell
+                std::vector<ContainerEntry> entries;
+                const std::string& s = pkt.raw;
+                size_t pos = 0;
+                while ((pos = s.find("\"ref_id\"", pos)) != std::string::npos) {
+                    pos += 8;
+                    char* e1;
+                    long cref = strtol(s.c_str() + pos, &e1, 10);
+                    if (e1 == s.c_str() + pos) { ++pos; continue; }
+                    // find items array for this container
+                    size_t itemsStart = s.find("\"items\"", pos);
+                    size_t nextRef    = s.find("\"ref_id\"", pos + 1);
+                    if (itemsStart == std::string::npos) break;
+                    size_t lb2 = s.find('[', itemsStart);
+                    size_t rb2 = s.find(']', lb2 != std::string::npos ? lb2 : 0);
+                    if (lb2 == std::string::npos || rb2 == std::string::npos) break;
+                    if (nextRef != std::string::npos && lb2 > nextRef) { pos = nextRef; continue; }
+                    std::string arr2 = s.substr(lb2 + 1, rb2 - lb2 - 1);
+                    // parse {form_id:M,count:K} objects
+                    size_t j = 0;
+                    while (j < arr2.size()) {
+                        size_t fpos = arr2.find("\"form_id\"", j);
+                        if (fpos == std::string::npos) break;
+                        fpos += 9;
+                        char* ef; long fid = strtol(arr2.c_str() + fpos, &ef, 10);
+                        size_t cpos = arr2.find("\"count\"", fpos);
+                        if (cpos == std::string::npos) break;
+                        cpos += 7;
+                        char* ec; long cnt2 = strtol(arr2.c_str() + cpos, &ec, 10);
+                        if (fid > 0 && cnt2 > 0)
+                            entries.push_back({ (uint32_t)cref, (uint32_t)fid, (int)cnt2 });
+                        j = (size_t)(ec - arr2.c_str());
+                    }
+                    pos = rb2 + 1;
+                }
+                if (!entries.empty())
+                    NpcSync_OnContainerState(entries.data(), (int)entries.size());
+                break;
+            }
+
             default:
                 break;
             }
@@ -552,6 +638,31 @@ void GameHooks_Tick() {
     // Sample HP every tick (~200ms) so ghost health names stay current during combat.
     if (g_phase == AuthPhase::Done && g_network.isConnected())
         g_playerHp.store(SamplePlayerHp());
+
+    // NPC kill + container loot scan — mirrors world.lua cellKey logic
+    if (g_phase == AuthPhase::Done && g_network.isConnected()) {
+        PlayerState ps = PosSync_GetLocal();
+        std::string cellKey;
+        if (ps.valid) {
+            if (ps.worldspaceFormID == 0) {
+                // Interior: key is the cell formID
+                if (ps.cellFormID != 0) {
+                    char tmp[16];
+                    snprintf(tmp, sizeof(tmp), "%u", ps.cellFormID);
+                    cellKey = tmp;
+                }
+            } else {
+                // Exterior: bucket by zone (EXTERIOR_ZONE = 4096*3 = 12288)
+                static constexpr float kZone = 12288.f;
+                int gx = (int)std::floor(ps.x / kZone);
+                int gy = (int)std::floor(ps.y / kZone);
+                char tmp[48];
+                snprintf(tmp, sizeof(tmp), "E%u:%d:%d", ps.worldspaceFormID, gx, gy);
+                cellKey = tmp;
+            }
+        }
+        NpcSync_Tick(cellKey);
+    }
 
     // Ghost anim commands generated by GhostSystem_OnFrame are already in the queue above;
     // GhostSystem_OnFrame itself runs from the D3D9 Present hook for per-frame position writes.

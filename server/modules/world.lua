@@ -100,6 +100,18 @@ function M.handlePositionUpdate(char_id, pkt)
                 end
                 session.sendTo(char_id, json.encode(otherpkt))
             end
+
+            -- Send kill list for dead NPCs in the new cell
+            local killed = store.getKilledRefs(cell)
+            if #killed > 0 then
+                session.sendTo(char_id, json.encode({ type = "NPC_KILL_SYNC", refs = killed }))
+            end
+
+            -- Send looted container state for the new cell
+            local containers = store.getContainerState(cell)
+            if #containers > 0 then
+                session.sendTo(char_id, json.encode({ type = "CONTAINER_STATE", containers = containers }))
+            end
         end
     end
 
@@ -332,6 +344,46 @@ function M.handleBountyPaid(char_id, pkt)
     local hold = tostring(pkt.hold or "")
     if hold == "" then return end
     store.setBounty(char_id, hold, 0)
+end
+
+-- ── NPC kill sync ─────────────────────────────────────────────────────────────
+
+function M.handleNpcKilled(char_id, pkt)
+    local ref_id = tonumber(pkt.ref_id) or 0
+    local cell   = tostring(pkt.cell or "")
+    if ref_id == 0 or cell == "" then return end
+    -- Reject dynamic refs (formIds > 0xFF000000 are runtime-placed)
+    if ref_id > 0xFF000000 then return end
+
+    local sess = session.getByCharId(char_id)
+    if not sess or sess.cell ~= cell then return end
+
+    local respawnHours = config and config.npc_respawn_hours or 0
+    store.setKilledRef(ref_id, cell, char_id, respawnHours)
+    session.broadcastToCell(cell,
+        json.encode({ type = "NPC_KILLED", ref_id = ref_id }), char_id)
+    print(("[world] NPC %d killed by char %d in cell %s"):format(ref_id, char_id, cell))
+end
+
+-- ── Container loot sync ───────────────────────────────────────────────────────
+
+function M.handleItemTaken(char_id, pkt)
+    local cref  = tonumber(pkt.container_ref_id) or 0
+    local iform = tonumber(pkt.item_form_id) or 0
+    local count = tonumber(pkt.count) or 0
+    local cell  = tostring(pkt.cell or "")
+    if cref == 0 or iform == 0 or count <= 0 or count > 500 or cell == "" then return end
+
+    local sess = session.getByCharId(char_id)
+    if not sess or sess.cell ~= cell then return end
+
+    store.recordItemTaken(cref, iform, count, cell)
+    session.broadcastToCell(cell, json.encode({
+        type             = "ITEM_SYNC",
+        container_ref_id = cref,
+        item_form_id     = iform,
+        count            = count,
+    }), char_id)
 end
 
 return M

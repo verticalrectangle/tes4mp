@@ -455,3 +455,7 @@ void GhostSystem_OnFrame() {
     DrainEvents();
     TickGhosts();
 }
+
+bool GhostSystem_IsGhostRef(uint32_t formId) {
+    return g_claimedFids.count(formId) != 0;
+}
