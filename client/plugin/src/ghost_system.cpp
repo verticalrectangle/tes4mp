@@ -354,6 +354,7 @@ static void TickGhosts() {
             snprintf(buf, sizeof(buf), "prid %08X", fid);
             EnqCmd(buf);
             EnqCmd("setrestrained 1");  // freeze AI so position writes stick
+            EnqCmd("setghost 1");       // non-collidable, invisible to enemy AI
 
             // Apply player name with HP indicator (OBSE SetName — per-ref, doesn't affect base form)
             if (!gh.name.empty()) {
