@@ -574,9 +574,14 @@ static void ApplyCharLoad(const std::string& raw) {
         if (!cell.empty())
             EnqueueCmd("coc \"" + SanitiseForCmd(cell) + "\"");
     } else {
-        // New character — skip the tutorial and drop them at the sewer exit.
-        EnqueueCmd("setstage MQ01 90");
-        EnqueueCmd("coc ICPrisonSewerExit01");
+        // New character — server tells us where to start.
+        std::string startQuest = json::getStr(raw, "start_quest");
+        int         startStage = json::getInt(raw, "start_quest_stage");
+        std::string startCell  = json::getStr(raw, "start_cell");
+        if (!startQuest.empty() && startStage > 0)
+            EnqueueCmd("setstage " + startQuest + " " + std::to_string(startStage));
+        if (!startCell.empty())
+            EnqueueCmd("coc " + startCell);
     }
 
     std::string name = json::getStr(raw, "name");
