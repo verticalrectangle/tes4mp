@@ -1,0 +1,25 @@
+{
+  "comment": "Quest IDs are Oblivion editor IDs. Global quests sync stage to all players. Personal quests are per-player.",
+  "global_prefixes": ["MQ"],
+  "personal_prefixes": ["FG", "MG", "TG", "DB", "MS", "Knights"],
+  "global_quests": [
+    "MQ00", "MQ01", "MQ02", "MQ03", "MQ04", "MQ05",
+    "MQ06", "MQ07", "MQ08", "MQ09", "MQ10", "MQ11",
+    "MQ12", "MQ13", "MQ14", "MQ15"
+  ],
+  "personal_quests": [],
+  "default": "personal",
+  "monitored": [
+    "MQ00", "MQ01", "MQ02", "MQ03", "MQ04", "MQ05",
+    "MQ06", "MQ07", "MQ08", "MQ09", "MQ10", "MQ11",
+    "MQ12", "MQ13", "MQ14", "MQ15",
+    "FG01", "FG02", "FG03", "FG04", "FG05",
+    "FG06", "FG07", "FG08", "FG09", "FG10",
+    "MG01", "MG02", "MG03", "MG04", "MG05",
+    "MG06", "MG07", "MG08", "MG09",
+    "TG01", "TG02", "TG03", "TG04", "TG05",
+    "TG06", "TG07", "TG08", "TG09", "TG10",
+    "DB01", "DB02", "DB03", "DB04", "DB05",
+    "DB06", "DB07", "DB08", "DB09", "DB10"
+  ]
+}

@@ -1,0 +1,35 @@
+; TES4MPMenu — Script attached to an activatable object (e.g. a "TES4MP Terminal" misc item)
+; Player activates it from inventory to open the command input dialog.
+;
+; Requires OBSE. Uses ShowTextEditMenu (OBSE function) for text input.
+; If ShowTextEditMenu is unavailable in your OBSE version, use MessageBox with buttons instead.
+
+scn TES4MPMenu
+
+string_var sInput
+short      bMenuOpen
+
+begin OnActivate
+    ; Prevent re-entry
+    if ( bMenuOpen == 1 )
+        return
+    endif
+    set bMenuOpen to 1
+
+    ; Show a text input dialog (OBSE extended function)
+    ; Signature: ShowTextEditMenu "prompt" "default" maxLen -> fills result into sv_Last
+    ShowTextEditMenu "TES4MP Command:" "" 128
+
+    ; sv_Last holds the result after ShowTextEditMenu returns
+    let sInput := sv_Last
+
+    if ( sv_Length sInput > 0 )
+        TES4MP_SendCommand sInput
+    endif
+
+    set bMenuOpen to 0
+end
+
+begin GameMode
+    ; Allow re-activation once the menu closes
+end

@@ -1,0 +1,143 @@
+; TES4MPMain — Quest Script (attach to a persistent quest in the CS)
+; Runs every frame. Handles connection, packet polling, and routing.
+;
+; OBSE required. Place TES4MP.dll in Data\OBSE\Plugins\
+; Set SERVER_HOST and SERVER_PORT below to match your server.
+
+scn TES4MPMain
+
+; ---- Config (edit these) ----
+string_var sServerHost
+short      iServerPort
+; --------------------------------
+
+short bInited
+short bConnected
+float fPollTimer
+float fQuestTimer
+
+short iPacketType
+string_var sStr1
+string_var sStr2
+short iInt1
+
+short iSyncCount
+short iSyncIdx
+
+begin GameMode
+
+    ; One-time init
+    if ( bInited == 0 )
+        set bInited to 1
+        let sServerHost := sv_Construct "127.0.0.1"
+        set iServerPort to 7777
+
+        let sStr1 := sv_Construct ""
+        let sStr2 := sv_Construct ""
+
+        ; Load character name for AUTH
+        string_var sName
+        let sName := sv_Construct ""
+        sv_Set sName To "%n" player
+
+        ; Load or generate a token (plugin handles persistence)
+        string_var sToken
+        let sToken := TES4MP_GetToken
+
+        ; Connect and send AUTH
+        let bConnected := TES4MP_Connect sServerHost iServerPort sName sToken
+        if ( bConnected == 0 )
+            Message "TES4MP: Failed to connect to server."
+        endif
+    endif
+
+    ; Check connection status every second
+    set fPollTimer to ( fPollTimer + GetSecondsPassed )
+    if ( fPollTimer >= 0.05 )
+        set fPollTimer to 0
+
+        let bConnected := TES4MP_IsConnected
+        if ( bConnected == 0 )
+            ; Reconnect logic could go here
+            return
+        endif
+
+        ; Drain the incoming packet queue
+        label 10
+            short bGot
+            let bGot := TES4MP_PollPacket
+            if ( bGot == 0 )
+                goto 20
+            endif
+
+            let iPacketType := TES4MP_GetPacketType
+
+            ; AUTH_OK (1)
+            if ( iPacketType == 1 )
+                let sStr1 := TES4MP_GetPacketStr
+                Message "TES4MP: Connected. Role: %z" sStr1
+                ; Trigger quest sync apply (handled in TES4MPQuests)
+                set TES4MPQuests.bSyncPending to 1
+            endif
+
+            ; AUTH_FAIL (2)
+            if ( iPacketType == 2 )
+                let sStr1 := TES4MP_GetPacketStr
+                Message "TES4MP: Auth failed - %z" sStr1
+            endif
+
+            ; QUEST_STAGE (3)
+            if ( iPacketType == 3 )
+                let sStr1 := TES4MP_GetPacketStr
+                let iInt1 := TES4MP_GetPacketInt
+                ; Delegate to quest handler
+                set TES4MPQuests.sIncomingQuestId to sStr1
+                set TES4MPQuests.iIncomingStage   to iInt1
+                set TES4MPQuests.bApplyIncoming   to 1
+            endif
+
+            ; QUEST_SYNC (4)
+            if ( iPacketType == 4 )
+                set TES4MPQuests.bSyncPending to 1
+            endif
+
+            ; PLAYER_JOIN (6)
+            if ( iPacketType == 6 )
+                let sStr1 := TES4MP_GetPacketStr
+                Message "TES4MP: %z joined." sStr1
+            endif
+
+            ; PLAYER_LEAVE (7)
+            if ( iPacketType == 7 )
+                let sStr1 := TES4MP_GetPacketStr
+                Message "TES4MP: %z left." sStr1
+            endif
+
+            ; COMMAND_RESULT (8) / MESSAGE (9)
+            if ( iPacketType == 8 )
+                let sStr1 := TES4MP_GetPacketStr
+                Message "%z" sStr1
+            endif
+            if ( iPacketType == 9 )
+                let sStr1 := TES4MP_GetPacketStr
+                Message "%z" sStr1
+            endif
+
+            ; KICK (10)
+            if ( iPacketType == 10 )
+                let sStr1 := TES4MP_GetPacketStr
+                Message "TES4MP: You were kicked - %z" sStr1
+            endif
+
+        goto 10
+        label 20
+    endif
+
+    ; Poll local quest stages every 2 seconds and send changes
+    set fQuestTimer to ( fQuestTimer + GetSecondsPassed )
+    if ( fQuestTimer >= 2.0 )
+        set fQuestTimer to 0
+        set TES4MPQuests.bPollQuests to 1
+    endif
+
+end

@@ -1,0 +1,114 @@
+<?xml version="1.0" ?>
+<menu name="TES4MP_Chat">
+	<class> &no_class; </class>
+	<stackingtype> &no_click_past; </stackingtype>
+
+	<rect name="bg">
+		<id> 1100 </id>
+		<locus> &true; </locus>
+		<x> 8 </x>
+		<y> 580 </y>
+		<width> 430 </width>
+		<height> 144 </height>
+		<red> 0 </red>
+		<green> 0 </green>
+		<blue> 0 </blue>
+		<alpha> 150 </alpha>
+
+		<text name="line0">
+			<x> 4 </x>
+			<y> 4 </y>
+			<width> 422 </width>
+			<height> 16 </height>
+			<string>  </string>
+			<font> 3 </font>
+			<red> 210 </red>
+			<green> 210 </green>
+			<blue> 210 </blue>
+		</text>
+
+		<text name="line1">
+			<x> 4 </x>
+			<y> 21 </y>
+			<width> 422 </width>
+			<height> 16 </height>
+			<string>  </string>
+			<font> 3 </font>
+			<red> 210 </red>
+			<green> 210 </green>
+			<blue> 210 </blue>
+		</text>
+
+		<text name="line2">
+			<x> 4 </x>
+			<y> 38 </y>
+			<width> 422 </width>
+			<height> 16 </height>
+			<string>  </string>
+			<font> 3 </font>
+			<red> 210 </red>
+			<green> 210 </green>
+			<blue> 210 </blue>
+		</text>
+
+		<text name="line3">
+			<x> 4 </x>
+			<y> 55 </y>
+			<width> 422 </width>
+			<height> 16 </height>
+			<string>  </string>
+			<font> 3 </font>
+			<red> 210 </red>
+			<green> 210 </green>
+			<blue> 210 </blue>
+		</text>
+
+		<text name="line4">
+			<x> 4 </x>
+			<y> 72 </y>
+			<width> 422 </width>
+			<height> 16 </height>
+			<string>  </string>
+			<font> 3 </font>
+			<red> 210 </red>
+			<green> 210 </green>
+			<blue> 210 </blue>
+		</text>
+
+		<text name="line5">
+			<x> 4 </x>
+			<y> 89 </y>
+			<width> 422 </width>
+			<height> 16 </height>
+			<string>  </string>
+			<font> 3 </font>
+			<red> 210 </red>
+			<green> 210 </green>
+			<blue> 210 </blue>
+		</text>
+
+		<text name="line6">
+			<x> 4 </x>
+			<y> 106 </y>
+			<width> 422 </width>
+			<height> 16 </height>
+			<string>  </string>
+			<font> 3 </font>
+			<red> 210 </red>
+			<green> 210 </green>
+			<blue> 210 </blue>
+		</text>
+
+		<text name="line7">
+			<x> 4 </x>
+			<y> 123 </y>
+			<width> 422 </width>
+			<height> 16 </height>
+			<string>  </string>
+			<font> 3 </font>
+			<red> 255 </red>
+			<green> 255 </green>
+			<blue> 255 </blue>
+		</text>
+	</rect>
+</menu>

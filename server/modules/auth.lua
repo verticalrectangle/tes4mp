@@ -1,0 +1,59 @@
+-- auth.lua — Token-only auth. No passwords, no accounts.
+-- Client sends HELLO with its persistent machine token and the in-game player name.
+-- Known token → CHAR_LOAD immediately.
+-- Unknown token → character created from the supplied name → CHAR_LOAD.
+
+local store   = require("server.db.store")
+local session = require("server.modules.session")
+
+local M = {}
+
+local function send(sock, pkt)
+    local json = require("cjson")
+    sock:send(json.encode(pkt) .. "\n")
+end
+
+local function finalize(sock, info, char, config, is_new)
+    store.updateCharacterSeen(tonumber(char.id))
+    info.state   = "in_game"
+    info.char_id = tonumber(char.id)
+    session.addSession(sock, info, char, config, is_new)
+end
+
+function M.handleHello(sock, info, pkt, config)
+    local token = tostring(pkt.token or "")
+    if #token < 16 then
+        send(sock, { type = "KICK", reason = "bad token" })
+        return
+    end
+
+    local char = store.getCharByToken(token)
+    if char then
+        local name = tostring(pkt.name or ""):match("^%s*(.-)%s*$")
+        if #name >= 2 and #name <= 24 and name ~= char.name then
+            store.updateCharacterName(tonumber(char.id), name)
+            char.name = name
+            print(("[auth] HELLO → renamed char to %s"):format(name))
+        else
+            print(("[auth] HELLO → returning char=%s"):format(char.name))
+        end
+        finalize(sock, info, char, config, false)
+        return
+    end
+
+    -- New player — use the name they set in Oblivion's character creation screen.
+    local name = tostring(pkt.name or ""):match("^%s*(.-)%s*$")
+    if #name < 2 then name = "Adventurer" end
+    if #name > 24 then name = name:sub(1, 24) end
+
+    char = store.createCharByToken(token, name)
+    if not char then
+        send(sock, { type = "KICK", reason = "Failed to create character" })
+        return
+    end
+
+    print(("[auth] HELLO → created char=%s"):format(name))
+    finalize(sock, info, char, config, true)
+end
+
+return M
