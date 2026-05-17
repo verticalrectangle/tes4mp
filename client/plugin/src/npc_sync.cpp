@@ -197,7 +197,7 @@ void NpcSync_Tick(const std::string& cellKey) {
         ScanNpcKills(cell, cellKey);
     }
 
-    if (now - g_lastContMs >= 2000) {
+    if (now - g_lastContMs >= 200) {
         g_lastContMs = now;
         ScanContainerLoots(cell, cellKey);
     }
