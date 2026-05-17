@@ -141,6 +141,13 @@ if [[ "$(uname -s)" == "Linux" ]]; then
     LOADER="$OBLIVION_DIR/obse_loader.exe"
     LAUNCHER="$OBLIVION_DIR/OblivionLauncher.exe"
 
+    # Ship a pre-patched obse_loader.exe (Steam ownership check already NOP'd)
+    PATCHED_LOADER="$SCRIPT_DIR/dist/obse_loader.exe"
+    if [[ -f "$PATCHED_LOADER" ]]; then
+        cp "$PATCHED_LOADER" "$OBLIVION_DIR/obse_loader.exe"
+        green "  obse_loader.exe replaced with pre-patched version"
+    fi
+
     if [[ ! -f "$LOADER" ]]; then
         yellow "obse_loader.exe not found — skipping patches"
     else
