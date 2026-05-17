@@ -38,8 +38,7 @@ This will:
 1. Download and install OBSE 0021 if it isn't already present
 2. Copy `TES4MP.dll` into `Data/OBSE/Plugins/`
 3. Copy `TES4MP.ini` (only if not already there, so your settings are preserved)
-4. Install the chat overlay XML
-5. On Linux: patch `obse_loader.exe` for Steam compatibility
+4. On Linux: patch `obse_loader.exe` for Steam compatibility
 
 **Linux (Steam/Proton) — extra step:**  
 Set this in Steam → Oblivion → Properties → Launch Options:
@@ -127,14 +126,15 @@ The built `TES4MP.dll` is automatically copied to your Oblivion folder if the in
 - Character name synced from Oblivion's character creation screen
 - Position and rotation sync within cells
 - Cell transition events (GHOST_APPEAR / GHOST_LEAVE)
+- Ghost NPC spawning at runtime via `PlaceAtMe` — no ESP required
+- Per-frame ghost position interpolation via D3D9 Present hook
+- Ghost animation sync (idle / walk / run / turn)
 - Character stats saved server-side every 15 seconds
 - Dungeon clear tracking with cooldowns
 - Faction rank sync
 - Bounty tracking per hold
-- Basic chat overlay
 
 ## What doesn't work yet
 
-- Seeing other players visually (ghost NPC spawning — cell object list offsets unverified)
-- Appearance sync applied to ghosts
+- Appearance sync applied to ghosts (race/hair/face morphs not yet written to the ref)
 - Combat sync

@@ -153,17 +153,6 @@ static bool Cmd_TES4MP_ButtonCallback_Execute(COMMAND_ARGS) {
     return true;
 }
 
-// TES4MP_SetGhostRef slot  (ref command — called as "TES4MPGhostACHR01.TES4MP_SetGhostRef 0")
-// Stores the calling ref's pointer in the ghost slot array so the C++ ghost system can
-// write positions to it directly without any FormID or cell scanning.
-static bool Cmd_TES4MP_SetGhostRef_Execute(COMMAND_ARGS) {
-    int slot = 0;
-    ExtractArgsEx(paramInfo, arg1, opcodeOffsetPtr, scriptObj, eventList, &slot);
-    GhostRef_Register(slot, (void*)thisObj);
-    *result = 0;
-    return true;
-}
-
 // TES4MP_GetSyncEntry index -> 1 if valid (loads entry into g_currentPacket fields)
 static bool Cmd_TES4MP_GetSyncEntry_Execute(COMMAND_ARGS) {
     int idx = 0;
@@ -200,10 +189,6 @@ static ParamInfo kParams_ButtonCallback[] = {
 static ParamInfo kParams_GetSyncEntry[] = {
     { "index", kParamType_Integer, 0 },
 };
-static ParamInfo kParams_SetGhostRef[] = {
-    { "slot", kParamType_Integer, 0 },
-};
-
 // ---- Registration ----
 
 void RegisterScriptFunctions(OBSEInterface* obse) {
@@ -238,7 +223,6 @@ void RegisterScriptFunctions(OBSEInterface* obse) {
     REG(TES4MP_GetToken,       "Load or create persistent auth token",0, 0, nullptr);
     REG(TES4MP_GetSyncCount,   "Count of quests in last QUEST_SYNC",  0, 0, nullptr);
     REG(TES4MP_GetSyncEntry,   "Load sync entry by index",            0, 1, kParams_GetSyncEntry);
-    REG(TES4MP_SetGhostRef,    "Register pre-placed ghost ACHR ref",  1, 1, kParams_SetGhostRef);
 
 #undef REG
 }

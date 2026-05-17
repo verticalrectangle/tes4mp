@@ -66,10 +66,5 @@ add_custom_command(TARGET TES4MP POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/TES4MP.ini"
         "${OBSE_PLUGIN_DIR}/TES4MP.ini"
-    # Chat overlay XML
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${OBLIVION_DATA}/Menus/generic"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/Data/Menus/generic/tes4mp_chat.xml"
-        "${OBLIVION_DATA}/Menus/generic/tes4mp_chat.xml"
-    COMMENT "Installed TES4MP.dll + TES4MP.ini + tes4mp_chat.xml -> Oblivion Data"
+    COMMENT "Installed TES4MP.dll + TES4MP.ini -> Oblivion Data"
 )

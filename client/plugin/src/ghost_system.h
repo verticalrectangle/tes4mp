@@ -4,10 +4,9 @@
 // Callback type for enqueuing a console command (thread-safe).
 typedef void (*GhostCmdFn)(const char* cmd);
 
-// numSlots  : number of ACHR ghost refs (must match GHOST_SLOTS)
-// refPtrs   : array of TESObjectREFR* pointers registered by TES4MP_SetGhostRef
-// cmdFn     : thread-safe function to queue a console command for the next game tick
-void GhostSystem_Init(int numSlots, void** refPtrs, GhostCmdFn cmdFn);
+// numSlots : maximum concurrent ghost players
+// cmdFn    : thread-safe function to queue a console command for the next game tick
+void GhostSystem_Init(int numSlots, GhostCmdFn cmdFn);
 void GhostSystem_Shutdown();
 
 // Called from the network thread — thread-safe.

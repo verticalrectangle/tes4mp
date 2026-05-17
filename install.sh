@@ -121,18 +121,6 @@ else
     cp "$INI" "$PLUGIN_DEST/TES4MP.ini"
 fi
 
-# ── Install chat overlay XML ──────────────────────────────────────────────────
-XML_SRC="$PLUGIN_DIR/Data/Menus/generic"
-XML_DEST="$OBLIVION_DIR/Data/Menus/generic"
-if [[ -d "$XML_SRC" ]]; then
-    mkdir -p "$XML_DEST"
-    for f in "$XML_SRC"/*.xml; do
-        [[ -f "$f" ]] || continue
-        echo "Copying $(basename "$f") → $XML_DEST/"
-        cp "$f" "$XML_DEST/"
-    done
-fi
-
 # ── Linux: apply OBSE Steam patches ──────────────────────────────────────────
 if [[ "$(uname -s)" == "Linux" ]]; then
     echo

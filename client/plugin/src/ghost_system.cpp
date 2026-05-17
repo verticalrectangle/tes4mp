@@ -3,9 +3,11 @@
 #include <windows.h>
 #include <string>
 #include <map>
+#include <set>
 #include <mutex>
 #include <queue>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 
 static void GS_DBG(const std::string& s) {
@@ -15,23 +17,27 @@ static void GS_DBG(const std::string& s) {
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 
-static constexpr int   SNAP_CAP      = 8;    // ring buffer size per ghost
-static constexpr DWORD INTERP_DELAY  = 120;  // ms behind live — ensures two snaps to lerp
+static constexpr int     SNAP_CAP       = 8;          // ring buffer size per ghost
+static constexpr DWORD   INTERP_DELAY   = 120;        // ms behind live for interpolation
+static constexpr DWORD   SPAWN_WAIT_MS  = 500;        // ms after PlaceAtMe before scanning
+static constexpr DWORD   SPAWN_TIMEOUT  = 3000;       // ms — retry PlaceAtMe if scan fails
+static constexpr uint32_t GHOST_BASE_NPC = 0x0001C34F; // vanilla Imperial Watch guard (Oblivion.esm)
 
 // ── Slot pool ─────────────────────────────────────────────────────────────────
 
-static int      g_numSlots = 0;
-static void**   g_refPtrs  = nullptr;
-static GhostCmdFn g_cmdFn  = nullptr;
-static bool     g_slotFree[32] = {};
+static int        g_numSlots    = 0;
+static GhostCmdFn g_cmdFn       = nullptr;
+static bool       g_slotFree[32] = {};
+static void*      g_slotRefs[32] = {};  // TESObjectREFR* per slot, filled by cell scan
 
 static void EnqCmd(const std::string& s) {
     if (g_cmdFn) g_cmdFn(s.c_str());
 }
 
-static std::string GhostEdId(int slot) {
-    return "TES4MPGhostACHR0" + std::to_string(slot + 1);
-}
+// ── Claimed ref tracking ──────────────────────────────────────────────────────
+// Prevents two ghosts appearing simultaneously from claiming the same newly placed ref.
+
+static std::set<uint32_t> g_claimedFids;
 
 // ── Snapshot ring buffer ──────────────────────────────────────────────────────
 
@@ -42,26 +48,26 @@ struct Snap {
 
 // ── Ghost state ───────────────────────────────────────────────────────────────
 
-enum class Phase { Free, Queued, Active };
+enum class Phase { Free, Spawning, Active };
 
 struct Ghost {
-    Phase       phase     = Phase::Free;
-    int         slot      = -1;
+    Phase       phase        = Phase::Free;
+    int         slot         = -1;
     std::string name;
 
-    // Interpolation buffer
     Snap        buf[SNAP_CAP] = {};
-    int         head  = 0;   // next write index
-    int         count = 0;
+    int         head          = 0;
+    int         count         = 0;
 
-    // Animation
-    int         animGroup     = 0;
-    int         appliedAnim   = -1;  // last anim sent to engine
-    DWORD       phaseReadyMs  = 0;   // when Queued→Active transition allowed
+    int         animGroup   = 0;
+    int         appliedAnim = -1;
+
+    DWORD       phaseReadyMs = 0;  // earliest time to start scanning
+    DWORD       spawnedMs    = 0;  // when last PlaceAtMe was enqueued (for timeout)
 };
 
 static std::map<std::string, Ghost> g_ghosts;
-static std::mutex                   g_mtx;
+static std::mutex                   g_mtx;    // guards g_ghosts only in Shutdown
 
 // ── Events from network thread ────────────────────────────────────────────────
 
@@ -92,8 +98,6 @@ static void WriteRef(void* ref, float x, float y, float z, float rotZ) {
     *reinterpret_cast<float*>(r + kRef_posZ) = z;
     *reinterpret_cast<float*>(r + kRef_rotZ) = rotZ;
 
-    // Also update the NiNode world transform and bound centre so the renderer
-    // doesn't have to wait for the scene-graph update pass next frame.
     void* ni = *reinterpret_cast<void**>(r + kRef_niNode);
     if (ni) {
         auto* n = static_cast<char*>(ni);
@@ -111,7 +115,7 @@ static void WriteRef(void* ref, float x, float y, float z, float rotZ) {
 static void PushSnap(Ghost& g, float x, float y, float z, float rotZ) {
     Snap& s = g.buf[g.head];
     s.ms   = GetTickCount();
-    s.x    = x; s.y = y; s.z = z; s.rotZ = rotZ;
+    s.x = x; s.y = y; s.z = z; s.rotZ = rotZ;
     g.head = (g.head + 1) % SNAP_CAP;
     if (g.count < SNAP_CAP) g.count++;
 }
@@ -123,23 +127,15 @@ static bool InterpPos(const Ghost& g, DWORD renderMs,
 {
     if (g.count == 0) return false;
 
-    // Find the two snapshots that bracket renderMs.
-    // Snapshots are stored newest-first (head-1 is newest).
-    // We want: snap_a.ms <= renderMs <= snap_b.ms
-    // i.e. a is older, b is newer. Lerp from a toward b.
-
     int newest = (g.head + SNAP_CAP - 1) % SNAP_CAP;
     int oldest = (g.head + SNAP_CAP - g.count) % SNAP_CAP;
 
-    // If renderMs is beyond our newest snap, clamp to newest.
     const Snap& sNew = g.buf[newest];
     if (renderMs >= sNew.ms || g.count == 1) {
         ox = sNew.x; oy = sNew.y; oz = sNew.z; orot = sNew.rotZ;
         return true;
     }
 
-    // Walk buffer to find bracketing pair.
-    // Indices in arrival order: oldest, ..., newest
     int prevIdx = oldest;
     for (int i = 1; i < g.count; i++) {
         int curIdx = (oldest + i) % SNAP_CAP;
@@ -157,10 +153,48 @@ static bool InterpPos(const Ghost& g, DWORD renderMs,
         prevIdx = curIdx;
     }
 
-    // renderMs is older than all our snaps — clamp to oldest.
     const Snap& sOld = g.buf[oldest];
     ox = sOld.x; oy = sOld.y; oz = sOld.z; orot = sOld.rotZ;
     return true;
+}
+
+// ── Cell scan: find newest unclaimed ref with given base form ID ──────────────
+// TESObjectCELL::ObjectListEntry is a linked list embedded at offset 0x048.
+// Each entry: { TESObjectREFR* refr @ +0x000, ObjectListEntry* next @ +0x004 }.
+
+static void* FindUnclaimedRefInCell(uint32_t baseFormId) {
+    using namespace Oblivion;
+
+    void* player = *(void**)kPlayerPtr;
+    if (!player) return nullptr;
+
+    void* cell = *(void**)((char*)player + kRef_parentCell);
+    if (!cell) return nullptr;
+
+    struct OLE { void* refr; OLE* next; };
+    OLE* entry = reinterpret_cast<OLE*>((char*)cell + 0x048);
+
+    void*    newest   = nullptr;
+    uint32_t newestId = 0;
+
+    while (entry) {
+        void* refr = entry->refr;
+        if (refr) {
+            void* base = *(void**)((char*)refr + kRef_baseForm);
+            if (base) {
+                uint32_t bid = *(uint32_t*)((char*)base + kForm_refID);
+                if (bid == baseFormId) {
+                    uint32_t rid = *(uint32_t*)((char*)refr + kForm_refID);
+                    if (rid > newestId && g_claimedFids.find(rid) == g_claimedFids.end()) {
+                        newestId = rid;
+                        newest   = refr;
+                    }
+                }
+            }
+        }
+        entry = entry->next;
+    }
+    return newest;
 }
 
 // ── Process events (game thread) ──────────────────────────────────────────────
@@ -182,7 +216,6 @@ static void DrainEvents() {
         case EvtType::Appear: {
             Ghost& gh = g_ghosts[ev.charId];
             if (gh.phase == Phase::Free) {
-                // Assign a free slot
                 int slot = -1;
                 for (int i = 0; i < g_numSlots; i++) {
                     if (g_slotFree[i]) { slot = i; g_slotFree[i] = false; break; }
@@ -194,15 +227,13 @@ static void DrainEvents() {
             }
 
             PushSnap(gh, ev.x, ev.y, ev.z, ev.rotZ);
-            gh.animGroup = ev.animGroup;
-            gh.phase = Phase::Queued;
-            gh.phaseReadyMs = now + 500; // wait 500ms for enable+moveto to settle
+            gh.animGroup    = ev.animGroup;
+            gh.phase        = Phase::Spawning;
+            gh.spawnedMs    = now;
+            gh.phaseReadyMs = now + SPAWN_WAIT_MS;
 
-            std::string edId = GhostEdId(gh.slot);
-            EnqCmd("prid " + edId);
-            EnqCmd("enable");
-            EnqCmd("moveto player");
-            EnqCmd("setrestrained 1");  // freeze AI so position writes stick
+            // PlaceAtMe creates an enabled ref near the player in the current cell.
+            EnqCmd("player.PlaceAtMe 1C34F 1");
             break;
         }
 
@@ -211,8 +242,17 @@ static void DrainEvents() {
             if (it == g_ghosts.end()) break;
             Ghost& gh = it->second;
             if (gh.slot >= 0) {
-                EnqCmd("prid " + GhostEdId(gh.slot));
-                EnqCmd("disable");
+                void* ref = g_slotRefs[gh.slot];
+                if (ref) {
+                    uint32_t fid = *(uint32_t*)((char*)ref + Oblivion::kForm_refID);
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "prid %08X", fid);
+                    EnqCmd(buf);
+                    EnqCmd("disable");
+                    EnqCmd("markfordelete");
+                    g_claimedFids.erase(fid);
+                    g_slotRefs[gh.slot] = nullptr;
+                }
                 g_slotFree[gh.slot] = true;
                 GS_DBG("Leave charId=" + ev.charId + " slot=" + std::to_string(gh.slot));
             }
@@ -226,8 +266,6 @@ static void DrainEvents() {
             Ghost& gh = it->second;
             PushSnap(gh, ev.x, ev.y, ev.z, ev.rotZ);
             gh.animGroup = ev.animGroup;
-            if (gh.phase == Phase::Queued && (int)(now - gh.phaseReadyMs) >= 0)
-                gh.phase = Phase::Active;
             break;
         }
 
@@ -238,24 +276,57 @@ static void DrainEvents() {
 // ── Per-frame update (Present hook — game thread) ─────────────────────────────
 
 static void TickGhosts() {
-    DWORD now       = GetTickCount();
-    DWORD renderMs  = (now > INTERP_DELAY) ? now - INTERP_DELAY : 0;
+    DWORD now      = GetTickCount();
+    DWORD renderMs = (now > INTERP_DELAY) ? now - INTERP_DELAY : 0;
 
     for (auto& [charId, gh] : g_ghosts) {
+        if (gh.phase == Phase::Spawning) {
+            // Wait for PlaceAtMe command to execute and the ref to appear in cell.
+            if ((int)(now - gh.phaseReadyMs) < 0) continue;
+
+            // Retry if we've been waiting too long (command may have been missed).
+            if (now - gh.spawnedMs > SPAWN_TIMEOUT) {
+                GS_DBG("spawn timeout for " + charId + ", retrying PlaceAtMe");
+                gh.spawnedMs    = now;
+                gh.phaseReadyMs = now + SPAWN_WAIT_MS;
+                EnqCmd("player.PlaceAtMe 1C34F 1");
+                continue;
+            }
+
+            void* ref = FindUnclaimedRefInCell(GHOST_BASE_NPC);
+            if (!ref) continue;  // not in cell yet, try next frame
+
+            uint32_t fid = *(uint32_t*)((char*)ref + Oblivion::kForm_refID);
+            g_slotRefs[gh.slot] = ref;
+            g_claimedFids.insert(fid);
+            gh.appliedAnim = -1;
+            gh.phase       = Phase::Active;
+
+            char buf[64];
+            snprintf(buf, sizeof(buf), "prid %08X", fid);
+            EnqCmd(buf);
+            EnqCmd("setrestrained 1");  // freeze AI so position writes stick
+
+            GS_DBG("spawned ghost charId=" + charId
+                   + " fid=" + std::to_string(fid)
+                   + " slot=" + std::to_string(gh.slot));
+            continue;
+        }
+
         if (gh.phase != Phase::Active) continue;
-        if (gh.slot < 0 || !g_refPtrs[gh.slot]) continue;
+        if (gh.slot < 0 || !g_slotRefs[gh.slot]) continue;
 
         float x, y, z, rotZ;
         if (!InterpPos(gh, renderMs, x, y, z, rotZ)) continue;
 
-        WriteRef(g_refPtrs[gh.slot], x, y, z, rotZ);
+        WriteRef(g_slotRefs[gh.slot], x, y, z, rotZ);
 
-        // Anim group transitions
         if (gh.animGroup != gh.appliedAnim) {
-            std::string edId = GhostEdId(gh.slot);
-            const char* gname = Oblivion::AnimGroupName(gh.animGroup);
-            EnqCmd("prid " + edId);
-            EnqCmd(std::string("PlayGroup ") + gname + " 1");
+            uint32_t fid = *(uint32_t*)((char*)g_slotRefs[gh.slot] + Oblivion::kForm_refID);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "prid %08X", fid);
+            EnqCmd(buf);
+            EnqCmd(std::string("PlayGroup ") + Oblivion::AnimGroupName(gh.animGroup) + " 1");
             gh.appliedAnim = gh.animGroup;
         }
     }
@@ -263,23 +334,32 @@ static void TickGhosts() {
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
-void GhostSystem_Init(int numSlots, void** refPtrs, GhostCmdFn cmdFn) {
+void GhostSystem_Init(int numSlots, GhostCmdFn cmdFn) {
     g_numSlots = numSlots;
-    g_refPtrs  = refPtrs;
     g_cmdFn    = cmdFn;
-    for (int i = 0; i < numSlots && i < 32; i++)
+    for (int i = 0; i < numSlots && i < 32; i++) {
         g_slotFree[i] = true;
+        g_slotRefs[i] = nullptr;
+    }
     GS_DBG("GhostSystem_Init slots=" + std::to_string(numSlots));
 }
 
 void GhostSystem_Shutdown() {
     std::lock_guard<std::mutex> lk(g_mtx);
     for (auto& [charId, gh] : g_ghosts) {
-        if (gh.slot >= 0) {
-            EnqCmd("prid " + GhostEdId(gh.slot));
+        if (gh.slot < 0) continue;
+        void* ref = g_slotRefs[gh.slot];
+        if (ref) {
+            uint32_t fid = *(uint32_t*)((char*)ref + Oblivion::kForm_refID);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "prid %08X", fid);
+            EnqCmd(buf);
             EnqCmd("disable");
-            if (gh.slot < 32) g_slotFree[gh.slot] = true;
+            EnqCmd("markfordelete");
+            g_claimedFids.erase(fid);
+            g_slotRefs[gh.slot] = nullptr;
         }
+        g_slotFree[gh.slot] = true;
     }
     g_ghosts.clear();
 }

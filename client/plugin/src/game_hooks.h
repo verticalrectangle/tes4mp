@@ -23,5 +23,3 @@ void GameHooks_Shutdown();
 // Used by ghost_system and other subsystems from any thread.
 void GameHooks_EnqueueCmd(const char* cmd);
 
-// Called by TES4MP_SetGhostRef script command to hand us a pre-placed ACHR pointer.
-void GhostRef_Register(int slot, void* ref);

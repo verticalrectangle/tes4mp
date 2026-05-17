@@ -36,12 +36,9 @@ static std::thread             g_pollThread;
 
 
 // ── Ghost NPC system ──────────────────────────────────────────────────────────
-// 4 pre-placed ACHR refs from TES4MP.esp, handed to us at game load by the
-// TES4MPMain quest script via TES4MP_SetGhostRef.
-// ghost_system.cpp owns all state; we just hold the ref pointer array here.
+// ghost_system.cpp owns all state; slots are filled dynamically via PlaceAtMe + cell scan.
 
 static constexpr int GHOST_SLOTS = 4;
-static void* g_ghostRefs[GHOST_SLOTS] = {};
 
 // Parse a float from a JSON string without external library.
 static float JF(const std::string& s, const char* key) {
@@ -255,13 +252,6 @@ static bool ReadAndSendCharSave() {
     }
 
     return true;
-}
-
-// ── Ghost NPC registration ─────────────────────────────────────────────────────
-
-void GhostRef_Register(int slot, void* ref) {
-    if (slot >= 0 && slot < GHOST_SLOTS)
-        g_ghostRefs[slot] = ref;
 }
 
 // ── CHAR_LOAD application ─────────────────────────────────────────────────────
@@ -501,9 +491,8 @@ void GameHooks_Init(OBSEInterface* obse, PluginHandle pluginHandle) {
     if (g_messaging)
         g_messaging->RegisterListener(g_handle, "OBSE", OnOBSEMessage);
 
-    // Ghost system: 4 ACHR slots, refs filled in later by TES4MP_SetGhostRef.
-    // GhostSystem_OnFrame is wired to the D3D9 Present hook for per-frame updates.
-    GhostSystem_Init(GHOST_SLOTS, g_ghostRefs, GameHooks_EnqueueCmd);
+    // Ghost system: slots filled dynamically via PlaceAtMe + cell scan on GHOST_APPEAR.
+    GhostSystem_Init(GHOST_SLOTS, GameHooks_EnqueueCmd);
     D3DHook_Init(GhostSystem_OnFrame);
 
     g_running    = true;
