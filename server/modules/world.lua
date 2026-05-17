@@ -6,9 +6,14 @@ local session = require("server.modules.session")
 local M = {}
 
 local config = nil
+local currentWeather = 0  -- last weather formId reported by any player
 
 function M.init(cfg)
     config = cfg
+end
+
+function M.getCurrentWeather()
+    return currentWeather
 end
 
 -- ── Position ──────────────────────────────────────────────────────────────────
@@ -84,6 +89,11 @@ function M.handlePositionUpdate(char_id, pkt)
             if appear then
                 local ok, decoded = pcall(json.decode, appear)
                 if ok then appearpkt.appearance = decoded end
+            end
+            -- Pass fast-travel flag so peers show a destination HUD message
+            if pkt.ft and tonumber(pkt.ft) == 1 then
+                appearpkt.fast_travel = true
+                appearpkt.cell_name   = tostring(pkt.cn or "")
             end
             session.broadcastToCell(cell, json.encode(appearpkt), char_id)
 
@@ -344,6 +354,25 @@ function M.handleBountyPaid(char_id, pkt)
     local hold = tostring(pkt.hold or "")
     if hold == "" then return end
     store.setBounty(char_id, hold, 0)
+end
+
+-- ── Player death ─────────────────────────────────────────────────────────────
+
+function M.handlePlayerDied(char_id, pkt)
+    local sess = session.getByCharId(char_id)
+    if not sess or not sess.cell or sess.cell == "" then return end
+    session.broadcastToCell(sess.cell,
+        json.encode({ type = "PLAYER_DIED", char_id = tostring(char_id) }), char_id)
+end
+
+-- ── Weather sync ──────────────────────────────────────────────────────────────
+
+function M.handleWeatherReport(char_id, pkt)
+    local wid = tonumber(pkt.weather_id) or 0
+    if wid == 0 or wid == currentWeather then return end
+    currentWeather = wid
+    -- Broadcast to all players so everyone sees the same weather
+    session.broadcast(json.encode({ type = "WEATHER_SYNC", weather_id = wid }))
 end
 
 -- ── NPC kill sync ─────────────────────────────────────────────────────────────

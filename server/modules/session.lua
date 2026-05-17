@@ -107,6 +107,13 @@ function M.addSession(sock, info, char, config, is_new)
     sendTo(sock, charLoadPkt)
     sendTo(sock, buildQuestSync(char_id))
     sendTo(sock, playerListPacket())
+    -- Reveal all map markers and sync current weather for coop consistency
+    sendTo(sock, json.encode({ type = "REVEAL_MARKERS" }))
+    local world = require("server.modules.world")
+    local wid = world.getCurrentWeather()
+    if wid and wid ~= 0 then
+        sendTo(sock, json.encode({ type = "WEATHER_SYNC", weather_id = wid }))
+    end
 
     local joinPkt = json.encode({ type = "PLAYER_JOIN", name = char.name, role = char.role or "player" })
     M.broadcast(joinPkt, char_id)

@@ -116,18 +116,55 @@ static void PollThread() {
                 float dtSec = (float)(nowMs - lastMs) / 1000.f;
                 int   anim  = ClassifyAnim(now, last, dtSec);
 
+                // Detect fast travel: cell changed AND 2D jump > 3000 units in one 10ms tick
+                // (max normal run speed ~600 u/s = 6 u/tick — 3000 is impossible without FT)
+                bool cellChanged = (now.cellFormID != last.cellFormID
+                                    || now.worldspaceFormID != last.worldspaceFormID);
+                bool isFastTravel = false;
+                char cellName[64] = {};
+                if (cellChanged && last.valid) {
+                    float hd = std::sqrt(dx*dx + dy*dy);
+                    if (hd > 3000.f) {
+                        isFastTravel = true;
+                        // Read cell name: TESObjectCELL TESFullName mixin at cell+0x018,
+                        // BSString.m_data char* at +0x004 → cell+0x01C
+                        void* player = *(void**)Oblivion::kPlayerPtr;
+                        if (player) {
+                            void* cell = *(void**)((char*)player + Oblivion::kRef_parentCell);
+                            if (cell && now.worldspaceFormID == 0) {
+                                // Interior: read name from TESFullName mixin
+                                const char* nm = *(const char**)((char*)cell + 0x01C);
+                                if (nm) {
+                                    snprintf(cellName, sizeof(cellName), "%s", nm);
+                                }
+                            } else {
+                                snprintf(cellName, sizeof(cellName), "Tamriel");
+                            }
+                        }
+                    }
+                }
+
                 if (dist > POS_DEAD_BAND || dr > ROT_DEAD_BAND
-                        || now.cellFormID != last.cellFormID
-                        || now.worldspaceFormID != last.worldspaceFormID
-                        || anim != lastAnim) {
-                    char buf[208];
-                    snprintf(buf, sizeof(buf),
-                        "{\"type\":\"POSITION_UPDATE\","
-                        "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
-                        "\"rot\":%.4f,\"cell\":%u,\"ws\":%u,\"anim\":%d,\"hp\":%d}",
-                        now.x, now.y, now.z, now.rotZ,
-                        now.cellFormID, now.worldspaceFormID, anim,
-                        GameHooks_GetPlayerHp());
+                        || cellChanged || anim != lastAnim) {
+                    char buf[280];
+                    if (isFastTravel && cellName[0]) {
+                        snprintf(buf, sizeof(buf),
+                            "{\"type\":\"POSITION_UPDATE\","
+                            "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
+                            "\"rot\":%.4f,\"cell\":%u,\"ws\":%u,\"anim\":%d,\"hp\":%d,"
+                            "\"ft\":1,\"cn\":\"%s\"}",
+                            now.x, now.y, now.z, now.rotZ,
+                            now.cellFormID, now.worldspaceFormID, anim,
+                            GameHooks_GetPlayerHp(), cellName);
+                    } else {
+                        snprintf(buf, sizeof(buf),
+                            "{\"type\":\"POSITION_UPDATE\","
+                            "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
+                            "\"rot\":%.4f,\"cell\":%u,\"ws\":%u,\"anim\":%d,\"hp\":%d}",
+                            now.x, now.y, now.z, now.rotZ,
+                            now.cellFormID, now.worldspaceFormID, anim,
+                            GameHooks_GetPlayerHp());
+                    }
                     g_network.send(buf);
                     last     = now;
                     lastMs   = nowMs;

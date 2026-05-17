@@ -212,6 +212,14 @@ void Network::dispatchLine(const std::string& line) {
     } else if (type == "CONTAINER_STATE") {
         p.type = PacketType::ContainerState;
         p.raw  = line;
+    } else if (type == "PLAYER_DIED") {
+        p.type     = PacketType::PlayerDied;
+        p.strField = getStr(line, "char_id");
+    } else if (type == "WEATHER_SYNC") {
+        p.type     = PacketType::WeatherSync;
+        p.intField = (int)getInt(line, "weather_id");
+    } else if (type == "REVEAL_MARKERS") {
+        p.type = PacketType::RevealMarkers;
     } else {
         return;
     }

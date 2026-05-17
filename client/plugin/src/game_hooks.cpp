@@ -112,6 +112,16 @@ static void EnqueueMsg(const std::string& msg) {
 // BSStringT::m_data (char*) is at +0x000 within BSStringT.
 // Combined: baseForm + 0xA4 = char* to player's name string.
 
+static uint32_t SampleWeatherId() {
+    // Sky singleton global pointer — Oblivion 1.2.416 (same pattern as kPlayerPtr)
+    static constexpr uintptr_t kSkyPtr = 0x00B13A94;
+    void* sky = *(void**)kSkyPtr;
+    if (!sky) return 0;
+    void* weather = *(void**)((char*)sky + 0x018);  // Sky::weather018
+    if (!weather) return 0;
+    return *(uint32_t*)((char*)weather + 0x00C);    // TESForm::refID
+}
+
 static int SamplePlayerHp() {
     void* player = *(void**)0x00B333C4;
     if (!player) return 0;
@@ -459,8 +469,14 @@ static void PollLoop() {
                     pkt.strField, charName, raceId, gender,
                     JF(pkt.raw, "x"), JF(pkt.raw, "y"), JF(pkt.raw, "z"),
                     JF(pkt.raw, "rot"), (int)JF(pkt.raw, "anim"));
-                if (!charName.empty())
-                    EnqueueMsg("[TES4MP] " + charName + " is nearby.");
+                if (!charName.empty()) {
+                    std::string cellName = json::getStr(pkt.raw, "cell_name");
+                    bool isFastTravel    = (JF(pkt.raw, "fast_travel") != 0.f);
+                    if (isFastTravel && !cellName.empty())
+                        EnqueueMsg("[TES4MP] " + charName + " fast-traveled to " + cellName + ".");
+                    else
+                        EnqueueMsg("[TES4MP] " + charName + " is nearby.");
+                }
                 break;
             }
 
@@ -551,6 +567,22 @@ static void PollLoop() {
                 break;
             }
 
+            case PacketType::PlayerDied:
+                // A peer died — despawn their ghost immediately
+                GhostSystem_OnLeave(pkt.strField);
+                break;
+
+            case PacketType::WeatherSync: {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "fw %X", (uint32_t)pkt.intField);
+                GameHooks_EnqueueCmd(buf);
+                break;
+            }
+
+            case PacketType::RevealMarkers:
+                GameHooks_EnqueueCmd("tmm 1");
+                break;
+
             default:
                 break;
             }
@@ -636,8 +668,30 @@ void GameHooks_Tick() {
     }
 
     // Sample HP every tick (~200ms) so ghost health names stay current during combat.
-    if (g_phase == AuthPhase::Done && g_network.isConnected())
-        g_playerHp.store(SamplePlayerHp());
+    // Also detect death transition and notify peers so our ghost despawns.
+    if (g_phase == AuthPhase::Done && g_network.isConnected()) {
+        static int prevHp = 0;
+        int hp = SamplePlayerHp();
+        g_playerHp.store(hp);
+        if (prevHp > 0 && hp <= 0) {
+            g_network.send("{\"type\":\"PLAYER_DIED\"}");
+            prevHp = 0;
+        } else {
+            prevHp = hp;
+        }
+    }
+
+    // Sample weather and report changes to server for cross-player sync
+    if (g_phase == AuthPhase::Done && g_network.isConnected()) {
+        static uint32_t lastWeatherId = 0;
+        uint32_t wid = SampleWeatherId();
+        if (wid != 0 && wid != lastWeatherId) {
+            lastWeatherId = wid;
+            char buf[48];
+            snprintf(buf, sizeof(buf), "{\"type\":\"WEATHER_REPORT\",\"weather_id\":%u}", wid);
+            g_network.send(buf);
+        }
+    }
 
     // NPC kill + container loot scan — mirrors world.lua cellKey logic
     if (g_phase == AuthPhase::Done && g_network.isConnected()) {

@@ -54,6 +54,9 @@ enum class PacketType : int {
     NpcKillSync     = 34,  // cell-entry kill list — ref_id array in raw
     ItemSync        = 35,  // server broadcasts ITEM_TAKEN — raw JSON
     ContainerState  = 36,  // cell-entry container state — raw JSON
+    PlayerDied      = 37,  // peer died — ghost should despawn (char_id in strField)
+    WeatherSync     = 38,  // server-authoritative weather — intField = formId
+    RevealMarkers   = 39,  // reveal all map markers on join
 };
 
 struct Packet {

@@ -127,6 +127,12 @@ local function handlePacket(sock, info, raw)
 
     elseif t == "ITEM_TAKEN" then
         world.handleItemTaken(cid, pkt)
+
+    elseif t == "PLAYER_DIED" then
+        world.handlePlayerDied(cid, pkt)
+
+    elseif t == "WEATHER_REPORT" then
+        world.handleWeatherReport(cid, pkt)
     end
 end
 
