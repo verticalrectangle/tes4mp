@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # ── TES4MP Client Installer ───────────────────────────────────────────────────
-# Copies TES4MP.dll + TES4MP.ini into the Oblivion OBSE plugin directory and,
-# on Linux, applies the two binary patches needed for OBSE to load under Steam.
+# Installs OBSE 0021 (if missing) and TES4MP into the Oblivion directory.
 #
 # Usage:
 #   ./install.sh                         # auto-detect Oblivion path
@@ -11,8 +10,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$SCRIPT_DIR/client/plugin"
-DLL="$PLUGIN_DIR/build/TES4MP.dll"
+# Prefer pre-built DLL in dist/; fall back to build output
+if [[ -f "$SCRIPT_DIR/dist/TES4MP.dll" ]]; then
+    DLL="$SCRIPT_DIR/dist/TES4MP.dll"
+else
+    DLL="$PLUGIN_DIR/build/TES4MP.dll"
+fi
 INI="$PLUGIN_DIR/TES4MP.ini"
+
+OBSE_URL="https://obse.silverlock.org/download/obse_0021.zip"
+OBSE_ZIP="/tmp/obse_0021.zip"
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -22,7 +29,6 @@ bold()   { printf '\033[1m%s\033[0m\n'  "$*"; }
 
 # ── Locate Oblivion ───────────────────────────────────────────────────────────
 find_oblivion() {
-    # Common Steam library locations
     local candidates=(
         "$HOME/.local/share/Steam/steamapps/common/Oblivion"
         "$HOME/.steam/steam/steamapps/common/Oblivion"
@@ -30,10 +36,7 @@ find_oblivion() {
         "C:/Program Files (x86)/Steam/steamapps/common/Oblivion"
     )
     for p in "${candidates[@]}"; do
-        if [[ -f "$p/Oblivion.exe" ]]; then
-            echo "$p"
-            return 0
-        fi
+        [[ -f "$p/Oblivion.exe" ]] && echo "$p" && return 0
     done
     return 1
 }
@@ -57,25 +60,51 @@ bold "TES4MP Installer"
 echo "Oblivion: $OBLIVION_DIR"
 echo
 
-# ── Check DLL is built ────────────────────────────────────────────────────────
-if [[ ! -f "$DLL" ]]; then
-    red "TES4MP.dll not found.  Build it first:"
-    echo "  cd client/plugin && cmake -B build -DCMAKE_TOOLCHAIN_FILE=../../cmake/mingw-toolchain.cmake && cmake --build build"
-    exit 1
+# ── Install OBSE if missing ───────────────────────────────────────────────────
+if [[ ! -f "$OBLIVION_DIR/obse_1_2_416.dll" ]]; then
+    yellow "OBSE not detected — downloading OBSE 0021..."
+
+    if command -v curl &>/dev/null; then
+        curl -fL "$OBSE_URL" -o "$OBSE_ZIP"
+    elif command -v wget &>/dev/null; then
+        wget -q "$OBSE_URL" -O "$OBSE_ZIP"
+    else
+        red "Neither curl nor wget found. Install one and retry, or manually install OBSE from:"
+        echo "  https://obse.silverlock.org/"
+        exit 1
+    fi
+
+    if ! command -v unzip &>/dev/null; then
+        red "unzip not found. Install it and retry."
+        exit 1
+    fi
+
+    OBSE_TMP="$(mktemp -d)"
+    unzip -q "$OBSE_ZIP" -d "$OBSE_TMP"
+    rm -f "$OBSE_ZIP"
+
+    # The zip contains a single subdirectory — find it
+    OBSE_SRC="$(find "$OBSE_TMP" -maxdepth 2 -name "obse_1_2_416.dll" | head -1 | xargs dirname)"
+    if [[ -z "$OBSE_SRC" ]]; then
+        red "Could not find OBSE files in downloaded archive."
+        exit 1
+    fi
+
+    for f in obse_1_2_416.dll obse_editor_1_2.dll obse_loader.exe obse_steam_loader.dll; do
+        [[ -f "$OBSE_SRC/$f" ]] && cp "$OBSE_SRC/$f" "$OBLIVION_DIR/$f"
+    done
+    rm -rf "$OBSE_TMP"
+
+    green "OBSE installed."
+else
+    green "OBSE already installed — skipping."
 fi
 
-# ── Check OBSE is installed ───────────────────────────────────────────────────
-if [[ ! -f "$OBLIVION_DIR/obse_1_2_416.dll" ]]; then
-    yellow "OBSE not detected in Oblivion folder."
-    echo "Download OBSE 0021 from https://obse.silverlock.org/ and copy these files"
-    echo "into $OBLIVION_DIR :"
-    echo "  obse_1_2_416.dll"
-    echo "  obse_editor_1_2.dll"
-    echo "  obse_loader.exe"
-    echo "  obse_steam_loader.dll"
-    echo
-    read -rp "Continue anyway? [y/N] " yn
-    [[ "$yn" =~ ^[Yy]$ ]] || exit 1
+# ── Check DLL exists ──────────────────────────────────────────────────────────
+if [[ ! -f "$DLL" ]]; then
+    red "TES4MP.dll not found. Build it first:"
+    echo "  cd client/plugin && cmake -B build -DCMAKE_TOOLCHAIN_FILE=../../cmake/mingw-toolchain.cmake && cmake --build build"
+    exit 1
 fi
 
 # ── Install plugin files ──────────────────────────────────────────────────────
@@ -113,9 +142,8 @@ if [[ "$(uname -s)" == "Linux" ]]; then
     LAUNCHER="$OBLIVION_DIR/OblivionLauncher.exe"
 
     if [[ ! -f "$LOADER" ]]; then
-        yellow "obse_loader.exe not found — skipping patches (install OBSE first)"
+        yellow "obse_loader.exe not found — skipping patches"
     else
-        # Patch 1: NOP the Steam ownership check in obse_loader.exe at 0x14CB
         LOADER_BYTE="$(dd if="$LOADER" bs=1 skip=$((0x14cb)) count=1 2>/dev/null | xxd -p)"
         if [[ "$LOADER_BYTE" == "75" ]]; then
             cp "$LOADER" "$LOADER.bak"
@@ -127,7 +155,6 @@ if [[ "$(uname -s)" == "Linux" ]]; then
             yellow "  obse_loader.exe: unexpected byte at 0x14CB ($LOADER_BYTE) — skipping patch"
         fi
 
-        # Patch 2: Redirect OblivionLauncher.exe to call obse_loader at 0x1347C
         if [[ ! -f "$LAUNCHER" ]]; then
             yellow "  OblivionLauncher.exe not found — skipping launcher patch"
         else
@@ -157,4 +184,4 @@ green "Installation complete!"
 echo
 echo "Next steps:"
 echo "  1. Edit $PLUGIN_DEST/TES4MP.ini and set Host= to your server address"
-echo "  2. Launch Oblivion through Steam, load a save — the login dialog will appear"
+echo "  2. Launch Oblivion through Steam — the mod connects automatically on load"

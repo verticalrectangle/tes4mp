@@ -26,20 +26,7 @@ Adds basic multiplayer to The Elder Scrolls IV: Oblivion (v1.2.416). Players sha
 
 ## Quick Install (client)
 
-### 1. Install OBSE
-
-Download OBSE 0021 from https://obse.silverlock.org/ and copy these files into your Oblivion folder:
-
-```
-obse_1_2_416.dll
-obse_editor_1_2.dll
-obse_loader.exe
-obse_steam_loader.dll
-```
-
-### 2. Install TES4MP
-
-Run the installer from the repo root:
+A prebuilt `TES4MP.dll` is included in `dist/`. The installer handles everything including downloading OBSE.
 
 ```bash
 ./install.sh
@@ -47,7 +34,12 @@ Run the installer from the repo root:
 ./install.sh "/path/to/Oblivion"
 ```
 
-This copies `TES4MP.dll` into `Data/OBSE/Plugins/` and `TES4MP.ini` next to it.
+This will:
+1. Download and install OBSE 0021 if it isn't already present
+2. Copy `TES4MP.dll` into `Data/OBSE/Plugins/`
+3. Copy `TES4MP.ini` (only if not already there, so your settings are preserved)
+4. Install the chat overlay XML
+5. On Linux: patch `obse_loader.exe` for Steam compatibility
 
 **Linux (Steam/Proton) — extra step:**  
 Set this in Steam → Oblivion → Properties → Launch Options:
