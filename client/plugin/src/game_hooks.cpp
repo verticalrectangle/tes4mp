@@ -159,6 +159,7 @@ void GameHooks_SetButtonResult(int v) { g_buttonResult.store(v); }
 
 enum class AuthPhase { Idle, WaitingHello, Done };
 static std::atomic<AuthPhase> g_phase{AuthPhase::Idle};
+static std::atomic<bool>      g_sendInitialSave{false};
 
 // Drive auth from game thread.
 static void TickAuth() {
@@ -342,6 +343,9 @@ static void ApplyCharLoad(const std::string& raw) {
             EnqueueCmd("setstage " + startQuest + " " + std::to_string(startStage));
         if (!startCell.empty())
             EnqueueCmd("coc " + startCell);
+        // Signal game thread to read and upload actual starting stats from memory.
+        // The engine has already applied race/class/birthsign by this point.
+        g_sendInitialSave = true;
     }
 
     std::string name = json::getStr(raw, "name");
@@ -612,6 +616,8 @@ static void OnOBSEMessage(OBSEMessagingInterface::Message* msg) {
 
     if (msg->type == OBSEMessagingInterface::kMessage_PostLoadGame) {
         DBG("PostLoadGame fired");
+        // Deferred from GameHooks_Init — D3D device exists by now
+        D3DHook_Init(GhostSystem_OnFrame);
         AttemptConnect();
     } else if (msg->type == OBSEMessagingInterface::kMessage_SaveGame &&
                g_phase == AuthPhase::Idle) {
@@ -633,8 +639,8 @@ void GameHooks_Init(OBSEInterface* obse, PluginHandle pluginHandle) {
         g_messaging->RegisterListener(g_handle, "OBSE", OnOBSEMessage);
 
     // Ghost system: slots filled dynamically via PlaceAtMe + cell scan on GHOST_APPEAR.
+    // D3DHook_Init is deferred to PostLoadGame so it runs after DXVK/wined3d is ready.
     GhostSystem_Init(GHOST_SLOTS, GameHooks_EnqueueCmd);
-    D3DHook_Init(GhostSystem_OnFrame);
 
     g_running    = true;
     g_pollThread = std::thread(PollLoop);
@@ -659,6 +665,11 @@ void GameHooks_Tick() {
 
     // Periodic stat checkpoint — must run on game thread (vtable calls into engine)
     if (g_phase == AuthPhase::Done && g_network.isConnected()) {
+        // Immediate upload for new characters: captures race/class/birthsign starting stats
+        if (g_sendInitialSave.exchange(false)) {
+            ReadAndSendCharSave();
+        }
+
         static DWORD lastSave = 0;
         DWORD now = GetTickCount();
         if (lastSave == 0 || (now - lastSave) >= 15000) {
