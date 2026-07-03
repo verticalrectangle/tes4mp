@@ -19,3 +19,4 @@ C:/tes4mp_debug.txt
 .DS_Store
 *.swp
 *.swo
+__pycache__/
