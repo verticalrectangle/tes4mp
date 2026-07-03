@@ -237,6 +237,14 @@ static bool GameIsMenuMode() {
 
 static std::atomic<bool>  g_menuModeCached{true};
 static std::atomic<DWORD> g_lastTickMs{0};
+static std::atomic<DWORD> g_transitionGuardUntil{0};
+
+// Raised the moment we issue a teleport (coc/cow): the tick-staleness check
+// has a ~500ms blind window at the start of a load, and ghost/NPC scans in
+// that window walk a world that is being torn down.
+static void BeginTransitionGuard(DWORD ms) {
+    g_transitionGuardUntil.store(GetTickCount() + ms);
+}
 
 // Current interior cell's editor ID via ExtraEditorID (empty if none).
 // Cell ExtraDataList sits at cell+0x028; BaseExtraList::m_data at +0x004.
@@ -278,6 +286,7 @@ static void TickPendingCoc() {
     }
     // "cow ..." (exterior worldspace teleport) passes through unchecked
     if (target.rfind("cow ", 0) == 0) {
+        BeginTransitionGuard(5000);  // no scans while the world streams in
         EnqueueCmd(target);
         return;
     }
@@ -286,6 +295,7 @@ static void TickPendingCoc() {
         DBG("TickPendingCoc: already in " + target + ", skipping coc");
         return;
     }
+    BeginTransitionGuard(5000);
     EnqueueCmd("coc \"" + target + "\"");
 }
 
@@ -300,9 +310,11 @@ std::string GameHooks_GetCellEditorId() {
 
 bool GameHooks_IsSafeToScan() {
     if (!InWorld()) return false;
+    DWORD now = GetTickCount();
+    if ((int)(g_transitionGuardUntil.load() - now) > 0) return false;
     // If the game tick hasn't run recently the game is loading (WM_TIMER
     // doesn't pump) — treat as unsafe rather than trust a stale sample.
-    DWORD age = GetTickCount() - g_lastTickMs.load();
+    DWORD age = now - g_lastTickMs.load();
     if (age > 500) return false;
     return !g_menuModeCached.load();
 }
@@ -524,8 +536,10 @@ static void TickChargen() {  // game thread only (IsMenuMode + console cmds)
     case ChargenState::Teleport:
         if (!c.startQuest.empty() && c.startStage > 0)
             EnqueueCmd("setstage " + c.startQuest + " " + std::to_string(c.startStage));
-        if (!c.startCell.empty())
+        if (!c.startCell.empty()) {
+            BeginTransitionGuard(5000);
             EnqueueCmd("coc " + c.startCell);
+        }
         c.stepMs = now;
         c.step   = ChargenState::WaitWorld;
         return;
