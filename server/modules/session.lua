@@ -47,16 +47,19 @@ end
 -- Returns skills, attrs, vitals tables and the encoded CHAR_LOAD packet.
 -- Callers that need the raw tables (addSession) use the first three return values
 -- to seed the session cache without a second DB round-trip.
-local function buildCharLoad(char, is_new)
+local function buildCharLoad(char, is_new, config)
     local cid    = tonumber(char.id)
     local skills = store.getCharacterSkills(cid)
     local attrs  = store.getCharacterAttributes(cid)
     local vitals = store.getCharacterVitals(cid) or {}
     local json   = require("cjson")
     local bounties = store.getBounties(cid)
+    local quests = require("server.modules.quests")
     local pkt = json.encode({
         type       = "CHAR_LOAD",
         is_new     = is_new or false,
+        pvp        = (config and config.pvp == true) or false,
+        monitored  = quests.getMonitored(),
         name       = char.name,
         race       = char.race,
         class      = char.class,
@@ -88,8 +91,9 @@ function M.addSession(sock, info, char, config, is_new)
     local json    = require("cjson")
     local char_id = tonumber(char.id)
 
-    local skills, attrs, charLoadPkt = buildCharLoad(char, is_new)
+    local skills, attrs, charLoadPkt = buildCharLoad(char, is_new, config)
     local appearance = store.getAppearance(char_id)
+    local equipment  = store.getEquipment(char_id)
 
     sessions[char_id] = {
         client        = sock,
@@ -102,6 +106,7 @@ function M.addSession(sock, info, char, config, is_new)
         cached_attrs  = attrs,
         cell          = "",
         appearance    = appearance,
+        equipment     = equipment,
         last_pos      = { x=0, y=0, z=0, t=0 },
     }
 
@@ -209,6 +214,16 @@ function M.getPosCache(char_id)
     return sess and sess.last_pos or nil
 end
 
+function M.cacheEquipment(char_id, json_blob)
+    local sess = sessions[tonumber(char_id)]
+    if sess then sess.equipment = json_blob end
+end
+
+function M.getEquipmentCached(char_id)
+    local sess = sessions[tonumber(char_id)]
+    return sess and sess.equipment or nil
+end
+
 function M.cacheAppearance(char_id, json_blob)
     local sess = sessions[tonumber(char_id)]
     if sess then sess.appearance = json_blob end
@@ -227,10 +242,12 @@ function M.disconnect(char_id)
 
     local json = require("cjson")
 
-    -- Notify cell members this ghost is leaving
+    -- Notify cell members this ghost is leaving; hand over cell authority if held
     if sess.cell and sess.cell ~= "" then
         M.broadcastToCell(sess.cell,
             json.encode({ type = "GHOST_LEAVE", char_id = tostring(char_id) }), char_id)
+        local world = require("server.modules.world")
+        world.releaseAuthority(sess.cell, char_id)
     end
 
     M.broadcast(json.encode({ type = "PLAYER_LEAVE", name = sess.name }))

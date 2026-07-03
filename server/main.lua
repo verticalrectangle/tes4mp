@@ -134,6 +134,18 @@ local function handlePacket(sock, info, raw)
 
     elseif t == "WEATHER_REPORT" then
         world.handleWeatherReport(cid, pkt)
+
+    elseif t == "EQUIP_UPDATE" then
+        world.handleEquipUpdate(cid, pkt)
+
+    elseif t == "NPC_HP" then
+        world.handleNpcHp(cid, pkt)
+
+    elseif t == "NPC_DAMAGE" then
+        world.handleNpcDamage(cid, pkt)
+
+    elseif t == "PLAYER_HIT" then
+        world.handlePlayerHit(cid, pkt)
     end
 end
 

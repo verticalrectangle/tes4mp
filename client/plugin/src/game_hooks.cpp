@@ -1,6 +1,8 @@
 #include "game_hooks.h"
 #include "ghost_system.h"
 #include "npc_sync.h"
+#include "equip_sync.h"
+#include "quest_sync.h"
 #include "d3d_hook.h"
 #include "network.h"
 #include "config.h"
@@ -51,6 +53,73 @@ static float JF(const std::string& s, const char* key) {
     p += k.size();
     while (p < s.size() && s[p] == ' ') p++;
     return static_cast<float>(std::atof(s.c_str() + p));
+}
+
+// Parse an array of unsigned ints for a key, e.g. "items":[123,456].
+// Tolerates {} (cjson encodes an empty Lua table as an object).
+static std::vector<uint32_t> ParseUintArray(const std::string& s, const char* key) {
+    std::vector<uint32_t> out;
+    std::string k = std::string("\"") + key + "\"";
+    size_t p = s.find(k);
+    if (p == std::string::npos) return out;
+    p = s.find_first_of("[{", p + k.size());
+    if (p == std::string::npos) return out;
+    char close = (s[p] == '[') ? ']' : '}';
+    size_t end = s.find(close, p);
+    if (end == std::string::npos) return out;
+    size_t i = p + 1;
+    while (i < end) {
+        while (i < end && !std::isdigit((unsigned char)s[i])) ++i;
+        if (i >= end) break;
+        char* e;
+        unsigned long v = strtoul(s.c_str() + i, &e, 10);
+        out.push_back((uint32_t)v);
+        i = (size_t)(e - s.c_str());
+    }
+    return out;
+}
+
+// Parse an array of strings for a key, e.g. "monitored":["MQ00","MQ01"].
+static std::vector<std::string> ParseStrArray(const std::string& s, const char* key) {
+    std::vector<std::string> out;
+    std::string k = std::string("\"") + key + "\"";
+    size_t p = s.find(k);
+    if (p == std::string::npos) return out;
+    p = s.find('[', p + k.size());
+    if (p == std::string::npos) return out;
+    size_t end = s.find(']', p);
+    if (end == std::string::npos) return out;
+    size_t i = p;
+    while (i < end) {
+        size_t q1 = s.find('"', i + 1);
+        if (q1 == std::string::npos || q1 > end) break;
+        size_t q2 = s.find('"', q1 + 1);
+        if (q2 == std::string::npos || q2 > end) break;
+        out.push_back(s.substr(q1 + 1, q2 - q1 - 1));
+        i = q2;
+    }
+    return out;
+}
+
+// Parse NPC_HP payload: "npcs":[{"ref":N,"hp":M},...]
+static std::vector<NpcHpEntry> ParseNpcHpArray(const std::string& s) {
+    std::vector<NpcHpEntry> out;
+    size_t p = s.find("\"npcs\"");
+    if (p == std::string::npos) return out;
+    size_t end = s.find(']', p);
+    if (end == std::string::npos) return out;
+    while (true) {
+        size_t rp = s.find("\"ref\"", p);
+        if (rp == std::string::npos || rp > end) break;
+        size_t hp = s.find("\"hp\"", rp);
+        if (hp == std::string::npos || hp > end) break;
+        NpcHpEntry e;
+        e.ref = (uint32_t)strtoul(s.c_str() + rp + 6, nullptr, 10);
+        e.hp  = (int)strtol(s.c_str() + hp + 5, nullptr, 10);
+        out.push_back(e);
+        p = hp + 5;
+    }
+    return out;
 }
 
 // (Token persistence is handled by Network::loadOrCreateToken — %APPDATA%\TES4MP\token.txt)
@@ -139,6 +208,20 @@ static std::string ReadPlayerName() {
     return data ? std::string(data) : std::string{};
 }
 
+// True once a world is loaded (player exists and sits in a cell) — the
+// earliest point where connecting and running console commands is safe.
+static bool InWorld() {
+    void* player = *(void**)0x00B333C4;
+    if (!player) return false;
+    return *(void**)((char*)player + 0x040) != nullptr;  // kRef_parentCell
+}
+
+// Oblivion 1.2.416: bool IsMenuMode() — same routine xOBSE binds at 0x00578F60.
+// Game thread only.
+static bool GameIsMenuMode() {
+    return ((unsigned char(__cdecl*)())0x00578F60)() != 0;
+}
+
 // ── Auth state machine ────────────────────────────────────────────────────────
 
 enum class NetEvent { None, ServerHello };
@@ -172,7 +255,9 @@ static void TickAuth() {
     if (ev == NetEvent::ServerHello && g_phase == AuthPhase::WaitingHello) {
         std::string tok  = Network::loadOrCreateToken();
         std::string name = ReadPlayerName();
-        if (name.empty()) name = "Adventurer";
+        // Pre-chargen join: no name yet. Use a token-derived placeholder
+        // (names are UNIQUE server-side); CHAR_SAVE renames once chargen ends.
+        if (name.empty()) name = "Adventurer-" + tok.substr(0, 4);
         DBG("TickAuth: sending HELLO name=" + name);
         g_network.send(json::obj({
             json::str("type",  "HELLO"),
@@ -280,6 +365,107 @@ static bool ReadAndSendCharSave() {
     return true;
 }
 
+// ── Server-driven character creation ──────────────────────────────────────────
+// A new game connects immediately (readiness poll below); the server owns the
+// start. We teleport to the server start cell and chain the chargen menus
+// ourselves — no vanilla tutorial, no autosave dependency. Menu transitions are
+// detected via the engine's IsMenuMode() (0x00578F60, xOBSE binding).
+
+struct ChargenState {
+    enum Step { Inactive, WaitVanillaMenu, Teleport, WaitWorld,
+                NextMenu, WaitMenuOpen, WaitMenuClose, Finish };
+    Step        step        = Inactive;
+    bool        includeRace = true;   // false if the vanilla race menu already ran
+    int         menuIdx     = 0;
+    DWORD       stepMs      = 0;
+    DWORD       beganMs     = 0;
+    std::string startCell, startQuest;
+    int         startStage  = 0;
+};
+static ChargenState g_chargen;
+static std::mutex   g_chargenMtx;
+
+static const char* kChargenMenus[4] = {
+    "ShowRaceMenu", "ShowClassMenu", "ShowBirthsignMenu", "ShowNameMenu"
+};
+
+static void ChargenBegin(const std::string& cell, const std::string& quest, int stage) {
+    std::lock_guard<std::mutex> lk(g_chargenMtx);
+    g_chargen            = {};
+    g_chargen.step       = ChargenState::WaitVanillaMenu;
+    g_chargen.startCell  = cell;
+    g_chargen.startQuest = quest;
+    g_chargen.startStage = stage;
+    g_chargen.beganMs    = GetTickCount();
+    DBG("ChargenBegin cell=" + cell);
+}
+
+static void ChargenCancel() {
+    std::lock_guard<std::mutex> lk(g_chargenMtx);
+    g_chargen.step = ChargenState::Inactive;
+}
+
+static void TickChargen() {  // game thread only (IsMenuMode + console cmds)
+    std::lock_guard<std::mutex> lk(g_chargenMtx);
+    ChargenState& c = g_chargen;
+    if (c.step == ChargenState::Inactive) return;
+
+    DWORD now = GetTickCount();
+    // Failsafe: never wedge the join forever (menus stuck / IsMenuMode misread)
+    if (c.step != ChargenState::Finish && now - c.beganMs > 10u * 60u * 1000u)
+        c.step = ChargenState::Finish;
+
+    switch (c.step) {
+    case ChargenState::WaitVanillaMenu:
+        // A new game opens the race menu on its own — let the player finish it.
+        if (GameIsMenuMode()) { c.includeRace = false; return; }
+        c.step = ChargenState::Teleport;
+        return;
+
+    case ChargenState::Teleport:
+        if (!c.startQuest.empty() && c.startStage > 0)
+            EnqueueCmd("setstage " + c.startQuest + " " + std::to_string(c.startStage));
+        if (!c.startCell.empty())
+            EnqueueCmd("coc " + c.startCell);
+        c.stepMs = now;
+        c.step   = ChargenState::WaitWorld;
+        return;
+
+    case ChargenState::WaitWorld:
+        if (now - c.stepMs < 3000) return;  // let the cell load settle
+        c.menuIdx = c.includeRace ? 0 : 1;
+        c.step    = ChargenState::NextMenu;
+        return;
+
+    case ChargenState::NextMenu:
+        if (c.menuIdx >= 4) { c.step = ChargenState::Finish; return; }
+        EnqueueCmd(kChargenMenus[c.menuIdx]);
+        c.stepMs = now;
+        c.step   = ChargenState::WaitMenuOpen;
+        return;
+
+    case ChargenState::WaitMenuOpen:
+        if (GameIsMenuMode()) { c.step = ChargenState::WaitMenuClose; return; }
+        if (now - c.stepMs > 5000) c.step = ChargenState::NextMenu;  // re-issue
+        return;
+
+    case ChargenState::WaitMenuClose:
+        if (GameIsMenuMode()) return;  // player still choosing
+        c.menuIdx++;
+        c.step = ChargenState::NextMenu;
+        return;
+
+    case ChargenState::Finish:
+        c.step = ChargenState::Inactive;
+        g_sendInitialSave = true;  // upload real starting stats now
+        EnqueueCmd("Message \"[TES4MP] Character created - welcome!\"");
+        return;
+
+    case ChargenState::Inactive:
+        return;
+    }
+}
+
 // ── CHAR_LOAD application ─────────────────────────────────────────────────────
 
 static void ApplyActorValues(const std::string& raw, const std::string& key) {
@@ -317,16 +503,20 @@ static void ApplyCharLoad(const std::string& raw) {
     g_phase = AuthPhase::Done;
     PosSync_Start();
 
+    // Server PvP mode — ghosts become hittable and local hits are reported
+    GhostSystem_SetPvp(json::getBool(raw, "pvp"));
+
+    // Quests the server wants stage reports for
+    QuestSync_SetMonitored(ParseStrArray(raw, "monitored"));
+
     bool isNew = json::getBool(raw, "is_new");
     if (!isNew) {
         // Returning player — restore their saved state.
+        // Gold is intentionally NOT re-applied: the local save already carries it,
+        // and additem on every join duplicated it session after session.
         int level = json::getInt(raw, "level");
         if (level > 0)
             EnqueueCmd("player.setlevel " + std::to_string(level));
-
-        int gold = json::getInt(raw, "gold");
-        if (gold > 0)
-            EnqueueCmd("player.additem gold001 " + std::to_string(gold));
 
         ApplyActorValues(raw, "skills");
         ApplyActorValues(raw, "attributes");
@@ -336,16 +526,28 @@ static void ApplyCharLoad(const std::string& raw) {
             EnqueueCmd("coc \"" + SanitiseForCmd(cell) + "\"");
     } else {
         // New character — server tells us where to start.
+        int gold = json::getInt(raw, "gold");
+        if (gold > 0)
+            EnqueueCmd("player.additem gold001 " + std::to_string(gold));
+
         std::string startQuest = json::getStr(raw, "start_quest");
         int         startStage = json::getInt(raw, "start_quest_stage");
         std::string startCell  = json::getStr(raw, "start_cell");
-        if (!startQuest.empty() && startStage > 0)
-            EnqueueCmd("setstage " + startQuest + " " + std::to_string(startStage));
-        if (!startCell.empty())
-            EnqueueCmd("coc " + startCell);
-        // Signal game thread to read and upload actual starting stats from memory.
-        // The engine has already applied race/class/birthsign by this point.
-        g_sendInitialSave = true;
+
+        // No player name yet = chargen hasn't finished — take over the new-game
+        // flow: teleport to the server start and chain the chargen menus.
+        std::string curName = ReadPlayerName();
+        if (curName.empty() || curName == "Prisoner") {
+            ChargenBegin(startCell, startQuest, startStage);
+        } else {
+            // Chargen already complete (joined after character creation).
+            if (!startQuest.empty() && startStage > 0)
+                EnqueueCmd("setstage " + startQuest + " " + std::to_string(startStage));
+            if (!startCell.empty())
+                EnqueueCmd("coc " + startCell);
+            // Upload actual starting stats — race/class/birthsign already applied.
+            g_sendInitialSave = true;
+        }
     }
 
     std::string name = json::getStr(raw, "name");
@@ -455,6 +657,9 @@ static void PollLoop() {
                 g_phase = AuthPhase::Idle;
                 GhostSystem_Shutdown();
                 PosSync_Stop();
+                EquipSync_Reset();
+                QuestSync_Reset();
+                ChargenCancel();
                 break;
 
             case PacketType::PlayerPos:
@@ -473,6 +678,11 @@ static void PollLoop() {
                     pkt.strField, charName, raceId, gender,
                     JF(pkt.raw, "x"), JF(pkt.raw, "y"), JF(pkt.raw, "z"),
                     JF(pkt.raw, "rot"), (int)JF(pkt.raw, "anim"));
+                {
+                    auto equip = ParseUintArray(pkt.raw, "equipment");
+                    if (!equip.empty())
+                        GhostSystem_OnEquip(pkt.strField, equip.data(), (int)equip.size());
+                }
                 if (!charName.empty()) {
                     std::string cellName = json::getStr(pkt.raw, "cell_name");
                     bool isFastTravel    = (JF(pkt.raw, "fast_travel") != 0.f);
@@ -587,6 +797,41 @@ static void PollLoop() {
                 GameHooks_EnqueueCmd("tmm 1");
                 break;
 
+            case PacketType::EquipSync: {
+                auto items = ParseUintArray(pkt.raw, "items");
+                GhostSystem_OnEquip(pkt.strField, items.data(), (int)items.size());
+                break;
+            }
+
+            case PacketType::CellAuthority:
+                NpcSync_SetAuthority(pkt.strField.c_str(), pkt.intField != 0);
+                break;
+
+            case PacketType::NpcHp: {
+                auto npcs = ParseNpcHpArray(pkt.raw);
+                if (!npcs.empty())
+                    NpcSync_OnHpSync(npcs.data(), (int)npcs.size());
+                break;
+            }
+
+            case PacketType::NpcDamage:
+                NpcSync_OnDamageRequest(
+                    (uint32_t)(int)JF(pkt.raw, "ref_id"),
+                    (int)JF(pkt.raw, "amount"));
+                break;
+
+            case PacketType::DamageTaken: {
+                int amount = pkt.intField;
+                if (amount > 0 && amount <= 100) {
+                    std::ostringstream ss;
+                    ss << "player.damageav health " << amount;
+                    EnqueueCmd(ss.str());
+                    EnqueueMsg("[TES4MP] " + pkt.strField + " hit you for "
+                               + std::to_string(amount) + "!");
+                }
+                break;
+            }
+
             default:
                 break;
             }
@@ -598,7 +843,7 @@ static void PollLoop() {
 
 // ── OBSE messaging callback ───────────────────────────────────────────────────
 
-static void AttemptConnect() {
+static void AttemptConnect(bool verbose = true) {
     if (g_network.isConnected()) return;
     Config cfg = LoadConfig();
     DBG("connecting to " + cfg.host + ":" + std::to_string(cfg.port));
@@ -607,7 +852,9 @@ static void AttemptConnect() {
         g_phase = AuthPhase::WaitingHello;
     } else {
         DBG("connect FAILED");
-        EnqueueMsg("[TES4MP] Could not connect to " + cfg.host + ":" + std::to_string(cfg.port));
+        if (verbose)
+            EnqueueMsg("[TES4MP] Could not connect to " + cfg.host + ":" + std::to_string(cfg.port)
+                       + " (F10 to retry)");
     }
 }
 
@@ -659,6 +906,39 @@ void GameHooks_Tick() {
         }
     }
 
+    // Connection readiness: as soon as a world exists, install the render hook
+    // and connect — works for new games (no PostLoadGame ever fires there),
+    // loaded saves, and reconnects. F10 forces an immediate retry.
+    if (InWorld()) {
+        static bool d3dInit = false;
+        if (!d3dInit) {
+            d3dInit = true;
+            D3DHook_Init(GhostSystem_OnFrame);
+        }
+
+        static bool  f10Down     = false;
+        bool         down        = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+        bool         f10Pressed  = down && !f10Down;
+        f10Down = down;
+
+        if (g_phase == AuthPhase::Idle && !g_network.isConnected()) {
+            static DWORD lastAuto  = 0;
+            static bool  firstTry  = true;
+            DWORD now = GetTickCount();
+            if (f10Pressed) {
+                EnqueueMsg("[TES4MP] Connecting...");
+                AttemptConnect(true);
+            } else if (lastAuto == 0 || now - lastAuto >= 15000) {
+                lastAuto = now;
+                AttemptConnect(firstTry);  // only announce the first silent failure
+                firstTry = false;
+            }
+        }
+    }
+
+    // Server-driven chargen state machine (new characters joining pre-chargen)
+    TickChargen();
+
     // Drive auth state machine
     if (g_phase == AuthPhase::WaitingHello)
         TickAuth();
@@ -689,6 +969,39 @@ void GameHooks_Tick() {
             prevHp = 0;
         } else {
             prevHp = hp;
+        }
+    }
+
+    // Worn-equipment checkpoint (self rate-limited to 2s)
+    if (g_phase == AuthPhase::Done && g_network.isConnected()) {
+        EquipSync_Tick();
+    }
+
+    // Quest stage detection → QUEST_STAGE reports (self rate-limited to 5s)
+    if (g_phase == AuthPhase::Done && g_network.isConnected()) {
+        QuestSync_Tick();
+    }
+
+    // PvP: report HP drops on ghost actors as hits on their owners (~1s)
+    if (g_phase == AuthPhase::Done && g_network.isConnected()) {
+        static DWORD lastHitPoll = 0;
+        DWORD now = GetTickCount();
+        if (now - lastHitPoll >= 1000) {
+            lastHitPoll = now;
+            GhostHit hits[8];
+            int n = GhostSystem_PollHits(hits, 8);
+            for (int i = 0; i < n; ++i) {
+                // charId is server-issued and numeric; embed only if it stays that way
+                bool numeric = hits[i].charId[0] != '\0';
+                for (const char* c = hits[i].charId; *c && numeric; ++c)
+                    if (!std::isdigit((unsigned char)*c)) numeric = false;
+                if (!numeric) continue;
+                char buf[96];
+                snprintf(buf, sizeof(buf),
+                    "{\"type\":\"PLAYER_HIT\",\"target_char_id\":%s,\"amount\":%d}",
+                    hits[i].charId, hits[i].amount);
+                g_network.send(buf);
+            }
         }
     }
 

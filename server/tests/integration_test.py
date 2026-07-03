@@ -33,11 +33,11 @@ STARTUP_WAIT = 1.2   # seconds for server to bind
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 class Client:
-    def __init__(self):
+    def __init__(self, port: int = PORT):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.settimeout(RECV_TIMEOUT)
         self._buf  = ""
-        self._sock.connect((HOST, PORT))
+        self._sock.connect((HOST, port))
 
     def send(self, pkt: dict):
         line = json.dumps(pkt) + "\n"
@@ -91,8 +91,8 @@ class Client:
             pass
 
     @classmethod
-    def connect_and_auth(cls, token: str, name: str) -> "Client":
-        c = cls()
+    def connect_and_auth(cls, token: str, name: str, port: int = PORT) -> "Client":
+        c = cls(port)
         c.send({"type": "HELLO", "token": token, "name": name})
         c.expect("CHAR_LOAD")
         return c
@@ -101,24 +101,28 @@ class Client:
 class Server:
     """Lua server subprocess. Drains stdout to a log file to prevent pipe-block."""
 
-    def __init__(self):
+    def __init__(self, cfg: str = TEST_CFG, port: int = PORT, db: str = TEST_DB):
         self._proc: Optional[subprocess.Popen] = None
         self._logfile = None
-        self._logpath = os.path.join(tempfile.gettempdir(), "tes4mp_test_server.log")
+        self._cfg  = cfg
+        self._port = port
+        self._db   = db
+        self._logpath = os.path.join(tempfile.gettempdir(),
+                                     f"tes4mp_test_server_{port}.log")
 
     def start(self):
-        if os.path.exists(TEST_DB):
-            os.remove(TEST_DB)
+        if os.path.exists(self._db):
+            os.remove(self._db)
         self._logfile = open(self._logpath, "w")
         self._proc = subprocess.Popen(
-            SERVER_CMD,
+            ["lua", "server/main.lua", self._cfg],
             stdout=self._logfile,
             stderr=self._logfile,
         )
         time.sleep(STARTUP_WAIT)
         # Verify it's up
         try:
-            s = socket.create_connection((HOST, PORT), timeout=2)
+            s = socket.create_connection((HOST, self._port), timeout=2)
             s.close()
         except Exception as e:
             self._dump_log()
@@ -133,8 +137,8 @@ class Server:
                 self._proc.kill()
         if self._logfile:
             self._logfile.close()
-        if os.path.exists(TEST_DB):
-            os.remove(TEST_DB)
+        if os.path.exists(self._db):
+            os.remove(self._db)
 
     def dump_log(self):
         """Print server log — called on failure summary."""
@@ -192,6 +196,9 @@ def test_auth_new():
     c.send({"type": "HELLO", "token": token, "name": "NewPlayer"})
     pkt = c.expect("CHAR_LOAD")
     assert pkt.get("name") == "NewPlayer", f"name mismatch: {pkt.get('name')}"
+    # Client-side quest poller is driven by this list
+    monitored = pkt.get("monitored", [])
+    assert "MQ01" in monitored, f"monitored quest list missing/short: {monitored[:3]}"
     c.close()
 
 
@@ -574,6 +581,161 @@ def test_bounty():
     c.close()
 
 
+def test_equip_broadcast():
+    """EQUIP_UPDATE from A → B in same cell gets EQUIP_SYNC with filtered items."""
+    a = Client.connect_and_auth(fresh_token(), "EquipA")
+    b = Client.connect_and_auth(fresh_token(), "EquipB")
+
+    put_in_cell(a, 0, 0, 0, cell=111001)
+    put_in_cell(b, 0, 0, 0, cell=111001)
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    # 0x2F000001 has mod index 0x2F — must be filtered out (non-vanilla)
+    a.send({"type": "EQUIP_UPDATE", "items": [0x22F30, 0x1C6D5, 0x2F000001]})
+    pkt = b.expect("EQUIP_SYNC")
+    assert pkt.get("items") == [0x22F30, 0x1C6D5], f"items wrong: {pkt}"
+
+    a.close(); b.close()
+
+
+def test_equip_in_ghost_appear():
+    """Late joiner entering A's cell sees A's equipment inside GHOST_APPEAR."""
+    a = Client.connect_and_auth(fresh_token(), "EquipC")
+    put_in_cell(a, 0, 0, 0, cell=111002)
+    a.send({"type": "EQUIP_UPDATE", "items": [0x22F30]})
+    time.sleep(0.15)
+
+    b = Client.connect_and_auth(fresh_token(), "EquipD")
+    put_in_cell(b, 0, 0, 0, cell=111002)
+    pkt = b.expect("GHOST_APPEAR")
+    assert pkt.get("char_name") == "EquipC", f"wrong char: {pkt}"
+    assert pkt.get("equipment") == [0x22F30], f"equipment missing: {pkt}"
+
+    a.close(); b.close()
+
+
+def test_cell_authority_assign():
+    """First player in cell → authority:true; second → authority:false."""
+    a = Client.connect_and_auth(fresh_token(), "AuthA")
+    b = Client.connect_and_auth(fresh_token(), "AuthB")
+
+    put_in_cell(a, 0, 0, 0, cell=112001)
+    pkt = a.expect("CELL_AUTHORITY")
+    assert pkt.get("authority") is True, f"first player not authority: {pkt}"
+
+    put_in_cell(b, 0, 0, 0, cell=112001)
+    pkt = b.expect("CELL_AUTHORITY")
+    assert pkt.get("authority") is False, f"second player got authority: {pkt}"
+
+    a.close(); b.close()
+
+
+def test_cell_authority_handover():
+    """Authority leaves the cell → remaining player gets authority:true."""
+    a = Client.connect_and_auth(fresh_token(), "AuthC")
+    b = Client.connect_and_auth(fresh_token(), "AuthD")
+
+    put_in_cell(a, 0, 0, 0, cell=112002)
+    put_in_cell(b, 0, 0, 0, cell=112002)
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    put_in_cell(a, 0, 0, 0, cell=112003)  # authority walks out
+    pkt = b.expect("CELL_AUTHORITY")
+    assert pkt.get("authority") is True, f"handover failed: {pkt}"
+
+    a.close(); b.close()
+
+
+def test_npc_hp_relay():
+    """Authority's NPC_HP is relayed to peers; non-authority's is ignored."""
+    a = Client.connect_and_auth(fresh_token(), "HpAuthority")
+    b = Client.connect_and_auth(fresh_token(), "HpObserver")
+
+    cell_key = "113001"
+    put_in_cell(a, 0, 0, 0, cell=int(cell_key))   # a = authority
+    put_in_cell(b, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    a.recv_all(0.2); b.recv_all(0.2)
+
+    a.send({"type": "NPC_HP", "cell": cell_key,
+            "npcs": [{"ref": 4242, "hp": 55}, {"ref": 4243, "hp": 0}]})
+    pkt = b.expect("NPC_HP")
+    assert pkt.get("npcs") == [{"ref": 4242, "hp": 55}, {"ref": 4243, "hp": 0}], \
+        f"npcs wrong: {pkt}"
+
+    # Non-authority report must be dropped
+    b.send({"type": "NPC_HP", "cell": cell_key, "npcs": [{"ref": 4242, "hp": 1}]})
+    a.expect_none("NPC_HP", timeout=0.4)
+
+    a.close(); b.close()
+
+
+def test_npc_damage_routing():
+    """Non-authority NPC_DAMAGE is routed to the authority only."""
+    a = Client.connect_and_auth(fresh_token(), "DmgAuthority")
+    b = Client.connect_and_auth(fresh_token(), "DmgPeer")
+    c = Client.connect_and_auth(fresh_token(), "DmgBystander")
+
+    cell_key = "113002"
+    for cl in (a, b, c):
+        put_in_cell(cl, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    a.recv_all(0.2); b.recv_all(0.2); c.recv_all(0.2)
+
+    b.send({"type": "NPC_DAMAGE", "cell": cell_key, "ref_id": 777, "amount": 12})
+    pkt = a.expect("NPC_DAMAGE")
+    assert pkt.get("ref_id") == 777 and pkt.get("amount") == 12, f"wrong: {pkt}"
+    c.expect_none("NPC_DAMAGE", timeout=0.3)
+
+    a.close(); b.close(); c.close()
+
+
+def test_pvp_hit():
+    """PLAYER_HIT → target gets DAMAGE_TAKEN (pvp:true in test config), clamped to 100."""
+    a = Client.connect_and_auth(fresh_token(), "PvpAttacker")
+    b = Client.connect_and_auth(fresh_token(), "PvpVictim")
+
+    put_in_cell(b, 0, 0, 0, cell=114001)
+    put_in_cell(a, 10, 0, 0, cell=114001)
+
+    # A learns B's char_id from the GHOST_APPEAR it receives on entering the cell
+    pkt = a.expect("GHOST_APPEAR")
+    target_id = int(pkt.get("char_id"))
+    b.recv_all(0.2)
+
+    a.send({"type": "PLAYER_HIT", "target_char_id": target_id, "amount": 250})
+    pkt = b.expect("DAMAGE_TAKEN")
+    assert pkt.get("amount") == 100, f"not clamped: {pkt}"
+    assert pkt.get("from") == "PvpAttacker", f"wrong source: {pkt}"
+
+    a.close(); b.close()
+
+
+def test_pvp_disabled_gate():
+    """On a pvp:false server, PLAYER_HIT produces no DAMAGE_TAKEN."""
+    server = Server(cfg="server/tests/test_config_pvpoff.json",
+                    port=17778, db="server/data/test_tes4mp_pvpoff.db")
+    server.start()
+    try:
+        a = Client.connect_and_auth(fresh_token(), "PeaceA", port=17778)
+        b = Client.connect_and_auth(fresh_token(), "PeaceB", port=17778)
+
+        put_in_cell(b, 0, 0, 0, cell=114002)
+        put_in_cell(a, 10, 0, 0, cell=114002)
+        pkt = a.expect("GHOST_APPEAR")
+        target_id = int(pkt.get("char_id"))
+        b.recv_all(0.2)
+
+        a.send({"type": "PLAYER_HIT", "target_char_id": target_id, "amount": 50})
+        b.expect_none("DAMAGE_TAKEN", timeout=0.4)
+
+        a.close(); b.close()
+    finally:
+        server.stop()
+
+
 # ── Static DLL review ─────────────────────────────────────────────────────────
 
 def static_review():
@@ -672,6 +834,14 @@ def main():
             ("quest: stage sync",          test_quest_sync),
             ("faction: rank broadcast",    test_faction_rank),
             ("bounty: report + clear",     test_bounty),
+            ("equip: update broadcast",    test_equip_broadcast),
+            ("equip: in GHOST_APPEAR",     test_equip_in_ghost_appear),
+            ("authority: assignment",      test_cell_authority_assign),
+            ("authority: handover",        test_cell_authority_handover),
+            ("npc_hp: relay + gate",       test_npc_hp_relay),
+            ("npc_damage: routing",        test_npc_damage_routing),
+            ("pvp: hit routed + clamped",  test_pvp_hit),
+            ("pvp: disabled gate",         test_pvp_disabled_gate),
         ]
 
         for name, fn in tests:

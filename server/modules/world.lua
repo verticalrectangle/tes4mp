@@ -12,6 +12,42 @@ function M.init(cfg)
     config = cfg
 end
 
+-- ── Cell authority ────────────────────────────────────────────────────────────
+-- First player in a cell owns NPC simulation for it (sends NPC_HP batches).
+-- Handover goes to any remaining cell member when the authority leaves.
+
+local authorities = {}  -- cell key → char_id
+
+local function sendAuthority(char_id, cell, isAuth)
+    local json = require("cjson")
+    session.sendTo(char_id, json.encode({
+        type = "CELL_AUTHORITY", cell = cell, authority = isAuth }))
+end
+
+function M.getAuthority(cell)
+    return authorities[cell]
+end
+
+function M.assignAuthority(cell, char_id)
+    if cell == "" then return end
+    if not authorities[cell] then
+        authorities[cell] = char_id
+        sendAuthority(char_id, cell, true)
+    else
+        sendAuthority(char_id, cell, false)
+    end
+end
+
+function M.releaseAuthority(cell, char_id)
+    if cell == "" or authorities[cell] ~= char_id then return end
+    authorities[cell] = nil
+    local remaining = session.getInCell(cell, char_id)
+    if #remaining > 0 then
+        authorities[cell] = remaining[1].char_id
+        sendAuthority(remaining[1].char_id, cell, true)
+    end
+end
+
 function M.getCurrentWeather()
     return currentWeather
 end
@@ -84,6 +120,8 @@ function M.handlePositionUpdate(char_id, pkt)
         end
 
         session.updateCell(char_id, cell)
+        if oldCell ~= "" then M.releaseAuthority(oldCell, char_id) end
+        if cell ~= "" then M.assignAuthority(cell, char_id) end
 
         if cell ~= "" then
             -- Tell new cell members this ghost is appearing (always, appearance optional)
@@ -93,6 +131,11 @@ function M.handlePositionUpdate(char_id, pkt)
             if appear then
                 local ok, decoded = pcall(json.decode, appear)
                 if ok then appearpkt.appearance = decoded end
+            end
+            local equip = session.getEquipmentCached(char_id)
+            if equip then
+                local okE, decodedE = pcall(json.decode, equip)
+                if okE then appearpkt.equipment = decodedE end
             end
             -- Pass fast-travel flag so peers show a destination HUD message
             if pkt.ft and tonumber(pkt.ft) == 1 then
@@ -111,6 +154,11 @@ function M.handlePositionUpdate(char_id, pkt)
                 if otherAppear then
                     local ok2, decoded2 = pcall(json.decode, otherAppear)
                     if ok2 then otherpkt.appearance = decoded2 end
+                end
+                local otherEquip = session.getEquipmentCached(other.char_id)
+                if otherEquip then
+                    local ok3, decoded3 = pcall(json.decode, otherEquip)
+                    if ok3 then otherpkt.equipment = decoded3 end
                 end
                 session.sendTo(char_id, json.encode(otherpkt))
             end
@@ -189,12 +237,15 @@ function M.handleCharSave(char_id, pkt)
     local sess = session.getByCharId(char_id)
     if not sess then return end
 
-    -- Sync name if it changed
+    -- Sync name if it changed (names are UNIQUE — skip if another char owns it)
     local newName = tostring(pkt.name or ""):match("^%s*(.-)%s*$")
     if #newName >= 2 and #newName <= 24 and newName ~= sess.name then
-        store.updateCharacterName(char_id, newName)
-        sess.name = newName
-        print(("[world] char %d renamed to %s"):format(char_id, newName))
+        local existing = store.getCharacterByName(newName)
+        if not existing then
+            store.updateCharacterName(char_id, newName)
+            sess.name = newName
+            print(("[world] char %d renamed to %s"):format(char_id, newName))
+        end
     end
 
     -- Validate level against session cache — no DB read needed
@@ -421,6 +472,101 @@ function M.handleItemTaken(char_id, pkt)
         item_form_id     = iform,
         count            = count,
     }), char_id)
+end
+
+-- ── Equipment sync ────────────────────────────────────────────────────────────
+
+function M.handleEquipUpdate(char_id, pkt)
+    local json = require("cjson")
+    if type(pkt.items) ~= "table" then return end
+
+    local items = {}
+    for _, v in ipairs(pkt.items) do
+        local id = math.floor(tonumber(v) or 0)
+        -- Vanilla Oblivion.esm formIDs only (mod index 00) — resolvable on every client
+        if id > 0 and id < 0x01000000 then items[#items + 1] = id end
+        if #items >= 20 then break end
+    end
+
+    -- Persist as a JSON array string ("[]" when everything was unequipped:
+    -- cjson would encode an empty Lua table as an object)
+    local blob = (#items > 0) and json.encode(items) or "[]"
+    store.saveEquipment(char_id, blob)
+    session.cacheEquipment(char_id, blob)
+
+    local sess = session.getByCharId(char_id)
+    if sess and sess.cell and sess.cell ~= "" then
+        session.broadcastToCell(sess.cell, json.encode({
+            type    = "EQUIP_SYNC",
+            char_id = tostring(char_id),
+            items   = items,
+        }), char_id)
+    end
+end
+
+-- ── NPC HP authority sync ─────────────────────────────────────────────────────
+
+function M.handleNpcHp(char_id, pkt)
+    local json = require("cjson")
+    local cell = tostring(pkt.cell or "")
+    if cell == "" or type(pkt.npcs) ~= "table" then return end
+
+    local sess = session.getByCharId(char_id)
+    if not sess or sess.cell ~= cell then return end
+    if authorities[cell] ~= char_id then return end  -- only the authority may report
+
+    local npcs = {}
+    for _, e in ipairs(pkt.npcs) do
+        if type(e) == "table" then
+            local ref = math.floor(tonumber(e.ref) or 0)
+            local hp  = math.floor(tonumber(e.hp) or -1)
+            if ref > 0 and ref < 0xFF000000 and hp >= 0 then
+                npcs[#npcs + 1] = { ref = ref, hp = hp }
+            end
+        end
+        if #npcs >= 64 then break end
+    end
+    if #npcs == 0 then return end
+
+    session.broadcastToCell(cell,
+        json.encode({ type = "NPC_HP", cell = cell, npcs = npcs }), char_id)
+end
+
+function M.handleNpcDamage(char_id, pkt)
+    local json   = require("cjson")
+    local cell   = tostring(pkt.cell or "")
+    local ref    = math.floor(tonumber(pkt.ref_id) or 0)
+    local amount = math.floor(tonumber(pkt.amount) or 0)
+    if cell == "" or ref <= 0 or amount <= 0 or amount > 1000 then return end
+
+    local sess = session.getByCharId(char_id)
+    if not sess or sess.cell ~= cell then return end
+
+    -- Route to the cell authority; the authority applies its own damage locally
+    local auth = authorities[cell]
+    if not auth or auth == char_id then return end
+    session.sendTo(auth, json.encode({
+        type = "NPC_DAMAGE", cell = cell, ref_id = ref, amount = amount }))
+end
+
+-- ── PvP hits ──────────────────────────────────────────────────────────────────
+
+function M.handlePlayerHit(char_id, pkt)
+    local json = require("cjson")
+    if not (config and config.pvp == true) then return end
+
+    local target = tonumber(pkt.target_char_id)
+    local amount = math.floor(tonumber(pkt.amount) or 0)
+    if not target or amount <= 0 then return end
+    if amount > 100 then amount = 100 end
+
+    local sess  = session.getByCharId(char_id)
+    local tsess = session.getByCharId(target)
+    if not sess or not tsess then return end
+    if sess.cell == "" or sess.cell ~= tsess.cell then return end
+
+    session.sendTo(target, json.encode({
+        type = "DAMAGE_TAKEN", amount = amount, from = sess.name }))
 end
 
 return M

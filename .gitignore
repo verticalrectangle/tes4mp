@@ -6,6 +6,11 @@ server/data/tes4mp.db
 server/data/tes4mp.db-shm
 server/data/tes4mp.db-wal
 
+# Test-run database leftovers
+server/data/test_tes4mp*.db
+server/data/test_tes4mp*.db-shm
+server/data/test_tes4mp*.db-wal
+
 # Debug log written to Windows drive
 tes4mp_debug.txt
 C:/tes4mp_debug.txt

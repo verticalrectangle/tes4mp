@@ -9,6 +9,11 @@ function M.init(cfg)
     questConfig = cfg
 end
 
+-- Quest editor IDs the client should watch and report stage changes for.
+function M.getMonitored()
+    return (questConfig and questConfig.monitored) or {}
+end
+
 local function isGlobal(questId)
     if not questConfig then return false end
     for _, qid in ipairs(questConfig.global_quests or {}) do

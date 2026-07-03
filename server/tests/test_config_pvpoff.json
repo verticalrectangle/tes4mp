@@ -1,14 +1,14 @@
 {
   "host": "127.0.0.1",
-  "port": 17777,
+  "port": 17778,
   "server_name": "TES4MP Test",
   "max_players": 20,
-  "db_path": "server/data/test_tes4mp.db",
+  "db_path": "server/data/test_tes4mp_pvpoff.db",
   "tick_ms": 10,
   "motd": "test",
   "max_chars": 3,
   "session_expiry_hours": 24,
   "dungeon_cooldown_hours": 0,
   "npc_respawn_hours": 0,
-  "pvp": true
+  "pvp": false
 }

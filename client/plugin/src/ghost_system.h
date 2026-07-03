@@ -27,3 +27,16 @@ void GhostSystem_OnFrame();
 // Returns true if formId belongs to a ghost ref spawned by this system.
 // Used by npc_sync to skip scanning ghost actors.
 bool GhostSystem_IsGhostRef(uint32_t formId);
+
+// Server pvp flag (from CHAR_LOAD). When true, ghosts spawn hittable
+// (setghost 0) and local hits on them are reported via GhostSystem_PollHits.
+void GhostSystem_SetPvp(bool enabled);
+
+// Apply a peer's worn equipment (vanilla base formIDs) to their ghost.
+// Thread-safe (queued like Appear/PosUpdate).
+void GhostSystem_OnEquip(const std::string& charId, const uint32_t* items, int count);
+
+// Poll for HP drops on ghost actors caused by local hits (game thread, ~1s).
+// Fills out[] with up to max entries; returns the count.
+struct GhostHit { char charId[40]; int amount; };
+int GhostSystem_PollHits(GhostHit* out, int max);

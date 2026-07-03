@@ -8,8 +8,10 @@
 #include <cstring>
 #include <cstdio>
 #include <string>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 // ── Cell object list walk ─────────────────────────────────────────────────────
 // TESObjectCELL linked list of refs sits at cell+0x048.
@@ -40,10 +42,25 @@ static std::unordered_set<uint32_t> g_knownDead;    // refIds we've already repo
 // Container snapshot: containerRefId → { itemFormId → countTaken }
 static std::unordered_map<uint32_t, std::unordered_map<uint32_t, int>> g_containerSnapshot;
 
+// ── Authority state (server-assigned per cell) ────────────────────────────────
+
+static std::mutex   g_authMtx;
+static std::string  g_authCell;        // cell key we hold authority for ("" = none)
+static std::unordered_map<uint32_t, int> g_sentHp;       // authority: last hp broadcast
+static std::unordered_map<uint32_t, int> g_authorityHp;  // follower: last hp received
+
+// NPC_HP batches from the network thread, applied on the game-thread tick
+static std::mutex                 g_pendMtx;
+static std::vector<NpcHpEntry>    g_pendingHp;
+
 static void ResetCellState() {
     g_knownAlive.clear();
     g_knownDead.clear();
     g_containerSnapshot.clear();
+    g_sentHp.clear();
+    g_authorityHp.clear();
+    std::lock_guard<std::mutex> lk(g_pendMtx);
+    g_pendingHp.clear();
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -177,6 +194,96 @@ static void ScanContainerLoots(void* cell, const std::string& cellKey) {
     });
 }
 
+// ── NPC HP authority scan (~1s, authority only) ───────────────────────────────
+
+static bool IsActorRef(void* ref, uint32_t refId) {
+    if (refId == 0) return false;
+    if ((refId & 0xFF000000) != 0) return false;       // dynamic (runtime-placed)
+    if (GhostSystem_IsGhostRef(refId)) return false;
+    void* base = *(void**)((char*)ref + Oblivion::kRef_baseForm);
+    if (!base) return false;
+    uint8_t typeId = *(uint8_t*)((char*)base + Oblivion::kForm_typeID);
+    return typeId == Oblivion::kFormType_NPC || typeId == Oblivion::kFormType_Creature;
+}
+
+static void ScanNpcHpAsAuthority(void* cell, const std::string& cellKey) {
+    std::string batch;
+    int n = 0;
+
+    WalkCellRefs(cell, [&](void* ref, uint32_t refId) {
+        if (n >= 64) return false;
+        if (!IsActorRef(ref, refId)) return true;
+        if (g_knownDead.count(refId)) return true;     // kill flow owns dead NPCs
+
+        int hp = (int)GetActorHp(ref);
+        if (hp < 0) hp = 0;
+
+        auto it = g_sentHp.find(refId);
+        if (it != g_sentHp.end() && it->second == hp) return true;
+        g_sentHp[refId] = hp;
+
+        char e[48];
+        snprintf(e, sizeof(e), "%s{\"ref\":%u,\"hp\":%d}", n ? "," : "", refId, hp);
+        batch += e;
+        ++n;
+        return true;
+    });
+
+    if (n == 0) return;
+    std::string pkt = "{\"type\":\"NPC_HP\",\"cell\":\"" + cellKey + "\",\"npcs\":["
+                    + batch + "]}";
+    g_network.send(pkt);
+}
+
+// ── NPC HP apply (~game tick, followers) ─────────────────────────────────────
+
+static void ApplyPendingHp(void* cell, const std::string& cellKey) {
+    std::vector<NpcHpEntry> pending;
+    {
+        std::lock_guard<std::mutex> lk(g_pendMtx);
+        std::swap(pending, g_pendingHp);
+    }
+    if (pending.empty()) return;
+
+    // One walk to index the cell's actors by refId
+    std::unordered_map<uint32_t, void*> refs;
+    WalkCellRefs(cell, [&](void* ref, uint32_t refId) {
+        if (IsActorRef(ref, refId)) refs[refId] = ref;
+        return true;
+    });
+
+    for (const NpcHpEntry& e : pending) {
+        auto it = refs.find(e.ref);
+        if (it == refs.end()) continue;
+
+        int local = (int)GetActorHp(it->second);
+        g_authorityHp[e.ref] = e.hp;
+
+        if (e.hp <= 0) {
+            if (local > 0 && !g_knownDead.count(e.ref)) {
+                NpcSync_OnKilled(e.ref);  // prid + kill (death anim)
+            }
+            continue;
+        }
+
+        if (local < e.hp - 2) {
+            // We damaged this NPC locally and the authority doesn't know yet —
+            // report the delta instead of losing it to the overwrite below.
+            char buf[112];
+            snprintf(buf, sizeof(buf),
+                "{\"type\":\"NPC_DAMAGE\",\"cell\":\"%s\",\"ref_id\":%u,\"amount\":%d}",
+                cellKey.c_str(), e.ref, e.hp - local);
+            g_network.send(buf);
+        } else if (local != e.hp) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "prid %X", e.ref);
+            GameHooks_EnqueueCmd(buf);
+            snprintf(buf, sizeof(buf), "setav health %d", e.hp);
+            GameHooks_EnqueueCmd(buf);
+        }
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 void NpcSync_Tick(const std::string& cellKey) {
@@ -192,10 +299,19 @@ void NpcSync_Tick(const std::string& cellKey) {
 
     DWORD now = GetTickCount();
 
+    bool isAuthority;
+    {
+        std::lock_guard<std::mutex> lk(g_authMtx);
+        isAuthority = (g_authCell == cellKey);
+    }
+
     if (now - g_lastNpcMs >= 1000) {
         g_lastNpcMs = now;
         ScanNpcKills(cell, cellKey);
+        if (isAuthority) ScanNpcHpAsAuthority(cell, cellKey);
     }
+
+    if (!isAuthority) ApplyPendingHp(cell, cellKey);
 
     if (now - g_lastContMs >= 200) {
         g_lastContMs = now;
@@ -241,4 +357,28 @@ void NpcSync_OnContainerState(const ContainerEntry* entries, int count) {
         snprintf(buf, sizeof(buf), "removeitem %X %d", entries[i].formId, entries[i].count);
         GameHooks_EnqueueCmd(buf);
     }
+}
+
+void NpcSync_SetAuthority(const char* cellKey, bool authority) {
+    std::lock_guard<std::mutex> lk(g_authMtx);
+    if (authority) {
+        g_authCell = cellKey ? cellKey : "";
+    } else if (g_authCell == (cellKey ? cellKey : "")) {
+        g_authCell.clear();
+    }
+}
+
+void NpcSync_OnHpSync(const NpcHpEntry* entries, int count) {
+    std::lock_guard<std::mutex> lk(g_pendMtx);
+    for (int i = 0; i < count; ++i)
+        g_pendingHp.push_back(entries[i]);
+}
+
+void NpcSync_OnDamageRequest(uint32_t refId, int amount) {
+    if (amount <= 0) return;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "prid %X", refId);
+    GameHooks_EnqueueCmd(buf);
+    snprintf(buf, sizeof(buf), "damageav health %d", amount);
+    GameHooks_EnqueueCmd(buf);
 }

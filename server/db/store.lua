@@ -141,6 +141,10 @@ local TABLES = {
     char_id  INTEGER PRIMARY KEY REFERENCES characters(id),
     data     TEXT    NOT NULL
 )]],
+[[CREATE TABLE IF NOT EXISTS character_equipment (
+    char_id  INTEGER PRIMARY KEY REFERENCES characters(id),
+    data     TEXT    NOT NULL
+)]],
 [[CREATE TABLE IF NOT EXISTS killed_refs (
     ref_id     INTEGER PRIMARY KEY,
     cell_key   TEXT    NOT NULL,
@@ -520,6 +524,20 @@ end
 
 function M.getAppearance(char_id)
     local cur = query(("SELECT data FROM character_appearance WHERE char_id=%d"):format(tonumber(char_id)))
+    local row = rowOrNil(cur:fetch({}, "a"))
+    cur:close()
+    return row and row.data or nil
+end
+
+-- ── Character equipment ───────────────────────────────────────────────────────
+
+function M.saveEquipment(char_id, json_blob)
+    exec(("INSERT OR REPLACE INTO character_equipment (char_id,data) VALUES(%d,'%s')")
+        :format(tonumber(char_id), esc(json_blob)))
+end
+
+function M.getEquipment(char_id)
+    local cur = query(("SELECT data FROM character_equipment WHERE char_id=%d"):format(tonumber(char_id)))
     local row = rowOrNil(cur:fetch({}, "a"))
     cur:close()
     return row and row.data or nil

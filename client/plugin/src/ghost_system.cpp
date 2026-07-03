@@ -6,6 +6,7 @@
 #include <set>
 #include <mutex>
 #include <queue>
+#include <vector>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -84,16 +85,29 @@ struct Ghost {
     int         appliedAnim = -1;
     int         hp          = 999;
 
-    DWORD       phaseReadyMs = 0;  // earliest time to start scanning
-    DWORD       spawnedMs    = 0;  // when last PlaceAtMe was enqueued (for timeout)
+    bool        placed       = false;  // PlaceAtMe issued for this spawn attempt
+    DWORD       phaseReadyMs = 0;      // earliest time to start scanning
+    DWORD       spawnedMs    = 0;      // when last PlaceAtMe was enqueued (for timeout)
+
+    std::vector<uint32_t> equip;               // worn base formIDs from peer
+    bool        equipDirty   = false;
+    float       lastActorHp  = -1.f;           // actual actor HP at last combat poll
+    DWORD       hpSuppressUntil = 0;           // ignore drops right after our own setav
 };
 
 static std::map<std::string, Ghost> g_ghosts;
 static std::mutex                   g_mtx;    // guards g_ghosts only in Shutdown
 
+// PvP mode (server config, from CHAR_LOAD)
+static bool g_pvp = false;
+
+// Spawn serialization: at most one PlaceAtMe outstanding at any time, so the
+// newest-unclaimed-ref cell scan can never race between two appearing ghosts.
+static std::string g_spawnInFlight;  // charId currently spawning ("" = none)
+
 // ── Events from network thread ────────────────────────────────────────────────
 
-enum class EvtType { Appear, Leave, PosUpdate };
+enum class EvtType { Appear, Leave, PosUpdate, Equip };
 struct Evt {
     EvtType     type;
     std::string charId;
@@ -103,6 +117,7 @@ struct Evt {
     float       x, y, z, rotZ;
     int         animGroup;
     int         hp;
+    std::vector<uint32_t> items;  // Equip only
 };
 
 static std::queue<Evt> g_evtQ;
@@ -147,6 +162,18 @@ static void PushSnap(Ghost& g, float x, float y, float z, float rotZ) {
 
 // ── Interpolate position at renderTime ───────────────────────────────────────
 
+static constexpr float kPi = 3.14159265358979f;
+
+// Shortest-arc angle lerp — plain lerp spins the long way across the ±π wrap.
+static float LerpAngle(float a, float b, float t) {
+    float d = b - a;
+    while (d >  kPi) d -= 2.f * kPi;
+    while (d < -kPi) d += 2.f * kPi;
+    return a + t * d;
+}
+
+static constexpr DWORD EXTRAP_MAX_MS = 250;  // extrapolation cap on buffer underrun
+
 static bool InterpPos(const Ghost& g, DWORD renderMs,
                       float& ox, float& oy, float& oz, float& orot)
 {
@@ -158,6 +185,20 @@ static bool InterpPos(const Ghost& g, DWORD renderMs,
     const Snap& sNew = g.buf[newest];
     if (renderMs >= sNew.ms || g.count == 1) {
         ox = sNew.x; oy = sNew.y; oz = sNew.z; orot = sNew.rotZ;
+        // Buffer underrun — extrapolate briefly along the last known velocity
+        // to hide network jitter, then hold position.
+        if (g.count >= 2 && renderMs > sNew.ms) {
+            const Snap& sPrev = g.buf[(newest + SNAP_CAP - 1) % SNAP_CAP];
+            DWORD dt = sNew.ms - sPrev.ms;
+            if (dt > 0 && dt < 1000) {
+                DWORD ahead = renderMs - sNew.ms;
+                if (ahead > EXTRAP_MAX_MS) ahead = EXTRAP_MAX_MS;
+                float k = (float)ahead / (float)dt;
+                ox += (sNew.x - sPrev.x) * k;
+                oy += (sNew.y - sPrev.y) * k;
+                oz += (sNew.z - sPrev.z) * k;
+            }
+        }
         return true;
     }
 
@@ -169,10 +210,10 @@ static bool InterpPos(const Ghost& g, DWORD renderMs,
         if (sa.ms <= renderMs && renderMs <= sb.ms) {
             float t = (sb.ms == sa.ms) ? 0.f
                       : (float)(renderMs - sa.ms) / (float)(sb.ms - sa.ms);
-            ox   = sa.x    + t * (sb.x    - sa.x);
-            oy   = sa.y    + t * (sb.y    - sa.y);
-            oz   = sa.z    + t * (sb.z    - sa.z);
-            orot = sa.rotZ + t * (sb.rotZ - sa.rotZ);
+            ox   = sa.x + t * (sb.x - sa.x);
+            oy   = sa.y + t * (sb.y - sa.y);
+            oz   = sa.z + t * (sb.z - sa.z);
+            orot = LerpAngle(sa.rotZ, sb.rotZ, t);
             return true;
         }
         prevIdx = curIdx;
@@ -240,8 +281,6 @@ static void DrainEvents() {
         std::swap(local, g_evtQ);
     }
 
-    DWORD now = GetTickCount();
-
     while (!local.empty()) {
         Evt ev = std::move(local.front()); local.pop();
 
@@ -263,13 +302,11 @@ static void DrainEvents() {
             gh.gender     = ev.gender;
 
             PushSnap(gh, ev.x, ev.y, ev.z, ev.rotZ);
-            gh.animGroup    = ev.animGroup;
-            gh.phase        = Phase::Spawning;
-            gh.spawnedMs    = now;
-            gh.phaseReadyMs = now + SPAWN_WAIT_MS;
-
-            // PlaceAtMe creates an enabled ref near the player in the current cell.
-            EnqCmd("player.PlaceAtMe 1C34F 1");
+            gh.animGroup = ev.animGroup;
+            gh.phase     = Phase::Spawning;
+            gh.placed    = false;
+            // PlaceAtMe is issued by TickGhosts once no other spawn is in flight —
+            // serializing spawns keeps the newest-unclaimed-ref scan unambiguous.
             break;
         }
 
@@ -292,6 +329,7 @@ static void DrainEvents() {
                 g_slotFree[gh.slot] = true;
                 GS_DBG("Leave charId=" + ev.charId + " slot=" + std::to_string(gh.slot));
             }
+            if (g_spawnInFlight == ev.charId) g_spawnInFlight.clear();
             g_ghosts.erase(it);
             break;
         }
@@ -312,8 +350,23 @@ static void DrainEvents() {
                     std::string newName = NameWithHp(gh.name, gh.hp);
                     snprintf(buf, sizeof(buf), "SetName \"%s\"", newName.c_str());
                     EnqCmd(buf);
+                    // Mirror real actor HP so PvP hits land against a true value.
+                    // Suppress the hit poll briefly — the setav lands a tick later.
+                    if (ev.hp > 0) {
+                        snprintf(buf, sizeof(buf), "setav health %d", ev.hp);
+                        EnqCmd(buf);
+                        gh.hpSuppressUntil = GetTickCount() + 1500;
+                    }
                 }
             }
+            break;
+        }
+
+        case EvtType::Equip: {
+            auto it = g_ghosts.find(ev.charId);
+            if (it == g_ghosts.end()) break;
+            it->second.equip      = ev.items;
+            it->second.equipDirty = true;
             break;
         }
 
@@ -323,12 +376,41 @@ static void DrainEvents() {
 
 // ── Per-frame update (Present hook — game thread) ─────────────────────────────
 
+// Dress a claimed ghost ref in the peer's synced equipment.
+static void ApplyEquip(Ghost& gh) {
+    if (gh.slot < 0 || !g_slotRefs[gh.slot]) return;
+    uint32_t fid = *(uint32_t*)((char*)g_slotRefs[gh.slot] + Oblivion::kForm_refID);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "prid %08X", fid);
+    EnqCmd(buf);
+    EnqCmd("removeallitems");  // strip the guard base outfit first
+    for (uint32_t item : gh.equip) {
+        snprintf(buf, sizeof(buf), "additem %X 1", item);
+        EnqCmd(buf);
+        snprintf(buf, sizeof(buf), "equipitem %X", item);
+        EnqCmd(buf);
+    }
+    gh.equipDirty = false;
+}
+
 static void TickGhosts() {
     DWORD now      = GetTickCount();
     DWORD renderMs = (now > INTERP_DELAY) ? now - INTERP_DELAY : 0;
 
     for (auto& [charId, gh] : g_ghosts) {
         if (gh.phase == Phase::Spawning) {
+            // Serialize spawns: only the in-flight ghost may place and scan.
+            if (g_spawnInFlight.empty() && !gh.placed) {
+                g_spawnInFlight = charId;
+                gh.placed       = true;
+                gh.spawnedMs    = now;
+                gh.phaseReadyMs = now + SPAWN_WAIT_MS;
+                // PlaceAtMe creates an enabled ref near the player in the current cell.
+                EnqCmd("player.PlaceAtMe 1C34F 1");
+                continue;
+            }
+            if (g_spawnInFlight != charId) continue;  // queued behind another spawn
+
             // Wait for PlaceAtMe command to execute and the ref to appear in cell.
             if ((int)(now - gh.phaseReadyMs) < 0) continue;
 
@@ -347,14 +429,16 @@ static void TickGhosts() {
             uint32_t fid = *(uint32_t*)((char*)ref + Oblivion::kForm_refID);
             g_slotRefs[gh.slot] = ref;
             g_claimedFids.insert(fid);
-            gh.appliedAnim = -1;
-            gh.phase       = Phase::Active;
+            gh.appliedAnim  = -1;
+            gh.phase        = Phase::Active;
+            g_spawnInFlight.clear();  // next queued ghost may spawn
 
             char buf[128];
             snprintf(buf, sizeof(buf), "prid %08X", fid);
             EnqCmd(buf);
             EnqCmd("setrestrained 1");  // freeze AI so position writes stick
-            EnqCmd("setghost 1");       // non-collidable, invisible to enemy AI
+            // PvP servers get hittable ghosts; co-op keeps them intangible.
+            EnqCmd(g_pvp ? "setghost 0" : "setghost 1");
 
             // Apply player name with HP indicator (OBSE SetName — per-ref, doesn't affect base form)
             if (!gh.name.empty()) {
@@ -377,6 +461,16 @@ static void TickGhosts() {
                 EnqCmd("SexChange");
             }
 
+            // Mirror the peer's real HP onto the actor (needed for PvP hit detection)
+            if (gh.hp > 0 && gh.hp != 999) {
+                snprintf(buf, sizeof(buf), "setav health %d", gh.hp);
+                EnqCmd(buf);
+            }
+            gh.lastActorHp     = -1.f;  // combat poll re-seeds from the live actor
+            gh.hpSuppressUntil = now + 1500;
+
+            if (!gh.equip.empty()) ApplyEquip(gh);
+
             GS_DBG("spawned ghost charId=" + charId
                    + " fid=" + std::to_string(fid)
                    + " slot=" + std::to_string(gh.slot));
@@ -385,6 +479,8 @@ static void TickGhosts() {
 
         if (gh.phase != Phase::Active) continue;
         if (gh.slot < 0 || !g_slotRefs[gh.slot]) continue;
+
+        if (gh.equipDirty) ApplyEquip(gh);
 
         float x, y, z, rotZ;
         if (!InterpPos(gh, renderMs, x, y, z, rotZ)) continue;
@@ -458,4 +554,52 @@ void GhostSystem_OnFrame() {
 
 bool GhostSystem_IsGhostRef(uint32_t formId) {
     return g_claimedFids.count(formId) != 0;
+}
+
+void GhostSystem_SetPvp(bool enabled) {
+    g_pvp = enabled;
+}
+
+void GhostSystem_OnEquip(const std::string& charId, const uint32_t* items, int count) {
+    Evt e{};
+    e.type   = EvtType::Equip;
+    e.charId = charId;
+    e.items.assign(items, items + count);
+    PushEvt(std::move(e));
+}
+
+// getAV vtable dispatch — slot 0xA1, AV code 8 = Health (same as npc_sync).
+static float GhostActorHp(void* actor) {
+    typedef float(__fastcall* GetAVFn)(void*, void*, unsigned int);
+    GetAVFn fn = ((GetAVFn*)(*(void***)actor))[0xA1];
+    return fn(actor, nullptr, 8);
+}
+
+int GhostSystem_PollHits(GhostHit* out, int max) {
+    if (!g_pvp || max <= 0) return 0;
+    DWORD now = GetTickCount();
+    int n = 0;
+
+    for (auto& [charId, gh] : g_ghosts) {
+        if (n >= max) break;
+        if (gh.phase != Phase::Active || gh.slot < 0 || !g_slotRefs[gh.slot]) continue;
+
+        float cur = GhostActorHp(g_slotRefs[gh.slot]);
+
+        // Right after our own setav (spawn or server HP update) the actor value
+        // lags the queued command — resync without reporting.
+        if (gh.lastActorHp < 0.f || (int)(gh.hpSuppressUntil - now) > 0) {
+            gh.lastActorHp = cur;
+            continue;
+        }
+
+        if (cur < gh.lastActorHp - 0.5f) {
+            int amount = (int)(gh.lastActorHp - cur + 0.5f);
+            snprintf(out[n].charId, sizeof(out[n].charId), "%s", charId.c_str());
+            out[n].amount = amount;
+            ++n;
+        }
+        gh.lastActorHp = cur;
+    }
+    return n;
 }

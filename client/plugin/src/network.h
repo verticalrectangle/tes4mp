@@ -57,6 +57,11 @@ enum class PacketType : int {
     PlayerDied      = 37,  // peer died — ghost should despawn (char_id in strField)
     WeatherSync     = 38,  // server-authoritative weather — intField = formId
     RevealMarkers   = 39,  // reveal all map markers on join
+    EquipSync       = 40,  // peer equipment changed — char_id in strField, items in raw
+    CellAuthority   = 41,  // NPC sim authority for a cell — cell in strField, intField = 0/1
+    NpcHp           = 42,  // authority NPC health batch — cell + npcs array in raw
+    NpcDamage       = 43,  // damage request routed to us (authority) — ref_id/amount in raw
+    DamageTaken     = 44,  // PvP damage to apply — intField = amount, strField = attacker name
 };
 
 struct Packet {

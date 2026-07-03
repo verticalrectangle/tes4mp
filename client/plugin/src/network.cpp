@@ -220,6 +220,21 @@ void Network::dispatchLine(const std::string& line) {
         p.intField = (int)getInt(line, "weather_id");
     } else if (type == "REVEAL_MARKERS") {
         p.type = PacketType::RevealMarkers;
+    } else if (type == "EQUIP_SYNC") {
+        p.type     = PacketType::EquipSync;
+        p.strField = getStr(line, "char_id");
+    } else if (type == "CELL_AUTHORITY") {
+        p.type     = PacketType::CellAuthority;
+        p.strField = getStr(line, "cell");
+        p.intField = getBool(line, "authority") ? 1 : 0;
+    } else if (type == "NPC_HP") {
+        p.type = PacketType::NpcHp;
+    } else if (type == "NPC_DAMAGE") {
+        p.type = PacketType::NpcDamage;
+    } else if (type == "DAMAGE_TAKEN") {
+        p.type     = PacketType::DamageTaken;
+        p.intField = getInt(line, "amount");
+        p.strField = getStr(line, "from");
     } else {
         return;
     }
