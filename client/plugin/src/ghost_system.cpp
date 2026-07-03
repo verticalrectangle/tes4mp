@@ -20,8 +20,8 @@ static void GS_DBG(const std::string& s) {
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 
-static constexpr int     SNAP_CAP       = 8;          // ring buffer size per ghost
-static constexpr DWORD   INTERP_DELAY   = 120;        // ms behind live for interpolation
+static constexpr int     SNAP_CAP       = 16;         // ring buffer size per ghost (~1s at 15Hz)
+static constexpr DWORD   INTERP_DELAY   = 150;        // ms behind live for interpolation
 static constexpr DWORD   SPAWN_WAIT_MS  = 500;        // ms after PlaceAtMe before scanning
 static constexpr DWORD   SPAWN_TIMEOUT  = 3000;       // ms — retry PlaceAtMe if scan fails
 static constexpr uint32_t GHOST_BASE_NPC = 0x0001C34F; // preferred: Imperial Watch guard
@@ -202,8 +202,15 @@ static void WriteRef(void* ref, float x, float y, float z, float rotZ) {
 // ── Push snapshot ─────────────────────────────────────────────────────────────
 
 static void PushSnap(Ghost& g, float x, float y, float z, float rotZ) {
+    DWORD now = GetTickCount();
+    // Long silence (out of range, lag spike) — snap to the new position
+    // rather than gliding across the whole gap.
+    if (g.count > 0) {
+        int newest = (g.head + SNAP_CAP - 1) % SNAP_CAP;
+        if (now - g.buf[newest].ms > 1500) { g.count = 0; g.head = 0; }
+    }
     Snap& s = g.buf[g.head];
-    s.ms   = GetTickCount();
+    s.ms   = now;
     s.x = x; s.y = y; s.z = z; s.rotZ = rotZ;
     g.head = (g.head + 1) % SNAP_CAP;
     if (g.count < SNAP_CAP) g.count++;

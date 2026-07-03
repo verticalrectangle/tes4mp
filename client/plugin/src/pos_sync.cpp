@@ -76,6 +76,12 @@ static std::thread       g_thread;
 static constexpr float POS_DEAD_BAND = 0.5f;   // units — skip send if smaller
 static constexpr float ROT_DEAD_BAND = 0.02f;  // radians
 
+// While moving continuously the dead-band passes every 10ms poll — that's
+// ~100 packets/s, which overflows the ghost interp buffer on the other end
+// (8 snaps = 80ms < the 120ms render delay) and reads as jitter. 15 Hz is
+// plenty for smooth interpolation.
+static constexpr DWORD SEND_MIN_INTERVAL_MS = 66;
+
 // Classify movement as an Oblivion AnimGroup code based on speed/rotation.
 static int ClassifyAnim(const PlayerState& now, const PlayerState& last, float dtSec) {
     float dx    = now.x - last.x;
@@ -149,7 +155,8 @@ static void PollThread() {
                     }
                 }
 
-                if (dist > POS_DEAD_BAND || dr > ROT_DEAD_BAND
+                bool rateOk = (nowMs - lastMs) >= SEND_MIN_INTERVAL_MS;
+                if ((rateOk && (dist > POS_DEAD_BAND || dr > ROT_DEAD_BAND))
                         || cellChanged || anim != lastAnim) {
                     char buf[280];
                     if (isFastTravel && cellName[0]) {
