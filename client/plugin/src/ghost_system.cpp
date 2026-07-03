@@ -24,7 +24,7 @@ static constexpr int     SNAP_CAP       = 8;          // ring buffer size per gh
 static constexpr DWORD   INTERP_DELAY   = 120;        // ms behind live for interpolation
 static constexpr DWORD   SPAWN_WAIT_MS  = 500;        // ms after PlaceAtMe before scanning
 static constexpr DWORD   SPAWN_TIMEOUT  = 3000;       // ms — retry PlaceAtMe if scan fails
-static constexpr uint32_t GHOST_BASE_NPC = 0x0001C34F; // vanilla Imperial Watch guard (Oblivion.esm)
+static constexpr uint32_t GHOST_BASE_NPC = 0x0001C34F; // preferred: Imperial Watch guard
 
 // ── Slot pool ─────────────────────────────────────────────────────────────────
 
@@ -34,7 +34,55 @@ static bool       g_slotFree[32] = {};
 static void*      g_slotRefs[32] = {};  // TESObjectREFR* per slot, filled by cell scan
 
 static void EnqCmd(const std::string& s) {
-    if (g_cmdFn) g_cmdFn(s.c_str());
+    if (g_cmdFn) g_cmdFn(nullptr, s.c_str());
+}
+
+static void EnqRef(void* ref, const std::string& s) {
+    if (g_cmdFn) g_cmdFn(ref, s.c_str());
+}
+
+// ── Spawn base resolution ─────────────────────────────────────────────────────
+// The historical 0x1C34F constant was never verified. Validate it via the
+// engine's form table; if it isn't an NPC_ base, take the first vanilla NPC_
+// from the DataHandler bound-object list (race/name/gender get overridden
+// per-ghost anyway). Game thread only. 0 = nothing usable (retry later).
+
+static uint32_t g_ghostBase = 0;
+
+static uint32_t ResolveGhostBase() {
+    using namespace Oblivion;
+    if (g_ghostBase) return g_ghostBase;
+
+    void* f = LookupFormByID(GHOST_BASE_NPC);
+    uint8_t ft = f ? *(uint8_t*)((char*)f + kForm_typeID) : 0;
+    if (f && ft == kFormType_NPC) {
+        g_ghostBase = GHOST_BASE_NPC;
+        GS_DBG("spawn base 1C34F verified (NPC_)");
+        return g_ghostBase;
+    }
+    GS_DBG("spawn base 1C34F invalid (form=" + std::to_string((uintptr_t)f)
+           + " type=" + std::to_string(ft) + ") — scanning DataHandler");
+
+    void* dh = *(void**)kDataHandlerPtr;
+    if (!dh) return 0;
+    void* head = *(void**)dh;                       // BoundObjectListHead*
+    if (!head) return 0;
+    void* obj = *(void**)((char*)head + 0x004);     // first TESBoundObject*
+    while (obj) {
+        uint8_t t = *(uint8_t*)((char*)obj + kForm_typeID);
+        uint32_t fid = *(uint32_t*)((char*)obj + kForm_refID);
+        // vanilla (index 00), skip the player base (0x7)
+        if (t == kFormType_NPC && (fid >> 24) == 0 && fid != 0x7) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "spawn base fallback: %08X", fid);
+            GS_DBG(buf);
+            g_ghostBase = fid;
+            return g_ghostBase;
+        }
+        obj = *(void**)((char*)obj + 0x020);        // TESBoundObject::next
+    }
+    GS_DBG("no NPC_ base found in DataHandler");
+    return 0;
 }
 
 // ── Claimed ref tracking ──────────────────────────────────────────────────────
@@ -319,11 +367,8 @@ static void DrainEvents() {
                 void* ref = g_slotRefs[gh.slot];
                 if (ref) {
                     uint32_t fid = *(uint32_t*)((char*)ref + Oblivion::kForm_refID);
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "prid %08X", fid);
-                    EnqCmd(buf);
-                    EnqCmd("disable");
-                    EnqCmd("markfordelete");
+                    EnqRef(ref, "disable");
+                    EnqRef(ref, "markfordelete");
                     g_claimedFids.erase(fid);
                     g_slotRefs[gh.slot] = nullptr;
                 }
@@ -344,18 +389,16 @@ static void DrainEvents() {
             if (std::abs(ev.hp - gh.hp) > 5) {
                 gh.hp = ev.hp;
                 if (gh.phase == Phase::Active && gh.slot >= 0 && g_slotRefs[gh.slot]) {
-                    uint32_t fid = *(uint32_t*)((char*)g_slotRefs[gh.slot] + Oblivion::kForm_refID);
+                    void* ref = g_slotRefs[gh.slot];
                     char buf[128];
-                    snprintf(buf, sizeof(buf), "prid %08X", fid);
-                    EnqCmd(buf);
                     std::string newName = NameWithHp(gh.name, gh.hp);
                     snprintf(buf, sizeof(buf), "SetName \"%s\"", newName.c_str());
-                    EnqCmd(buf);
+                    EnqRef(ref, buf);
                     // Mirror real actor HP so PvP hits land against a true value.
                     // Suppress the hit poll briefly — the setav lands a tick later.
                     if (ev.hp > 0) {
                         snprintf(buf, sizeof(buf), "setav health %d", ev.hp);
-                        EnqCmd(buf);
+                        EnqRef(ref, buf);
                         gh.hpSuppressUntil = GetTickCount() + 1500;
                     }
                 }
@@ -378,18 +421,18 @@ static void DrainEvents() {
 // ── Per-frame update (Present hook — game thread) ─────────────────────────────
 
 // Dress a claimed ghost ref in the peer's synced equipment.
+// NOTE: additem/equipitem take hex formID args — pending verification that hex
+// form literals parse in this compile path (RunCmd FAILED lines will tell).
 static void ApplyEquip(Ghost& gh) {
     if (gh.slot < 0 || !g_slotRefs[gh.slot]) return;
-    uint32_t fid = *(uint32_t*)((char*)g_slotRefs[gh.slot] + Oblivion::kForm_refID);
+    void* ref = g_slotRefs[gh.slot];
     char buf[64];
-    snprintf(buf, sizeof(buf), "prid %08X", fid);
-    EnqCmd(buf);
-    EnqCmd("removeallitems");  // strip the guard base outfit first
+    EnqRef(ref, "removeallitems");  // strip the guard base outfit first
     for (uint32_t item : gh.equip) {
-        snprintf(buf, sizeof(buf), "additem %X 1", item);
-        EnqCmd(buf);
-        snprintf(buf, sizeof(buf), "equipitem %X", item);
-        EnqCmd(buf);
+        snprintf(buf, sizeof(buf), "additem %08X 1", item);
+        EnqRef(ref, buf);
+        snprintf(buf, sizeof(buf), "equipitem %08X", item);
+        EnqRef(ref, buf);
     }
     gh.equipDirty = false;
 }
@@ -407,12 +450,26 @@ static void TickGhosts() {
         if (gh.phase == Phase::Spawning) {
             // Serialize spawns: only the in-flight ghost may place and scan.
             if (g_spawnInFlight.empty() && !gh.placed) {
+                uint32_t base = ResolveGhostBase();
+                if (!base) continue;  // forms not ready yet — try next frame
+
+                // One-shot parser diagnostics: do hex ref/form literals work
+                // in this compile path at all? (prid 14 = player; additem F = 1 gold)
+                static bool diagDone = false;
+                if (!diagDone) {
+                    diagDone = true;
+                    EnqCmd("prid 14");
+                    EnqCmd("player.additem F 1");
+                }
+
                 g_spawnInFlight = charId;
                 gh.placed       = true;
                 gh.spawnedMs    = now;
                 gh.phaseReadyMs = now + SPAWN_WAIT_MS;
                 // PlaceAtMe creates an enabled ref near the player in the current cell.
-                EnqCmd("player.PlaceAtMe 1C34F 1");
+                char buf[64];
+                snprintf(buf, sizeof(buf), "player.PlaceAtMe %08X 1", base);
+                EnqCmd(buf);
                 continue;
             }
             if (g_spawnInFlight != charId) continue;  // queued behind another spawn
@@ -422,6 +479,8 @@ static void TickGhosts() {
 
             // Retry if we've been waiting too long (command may have been missed).
             if (now - gh.spawnedMs > SPAWN_TIMEOUT) {
+                char cmdBuf[64];
+                snprintf(cmdBuf, sizeof(cmdBuf), "player.PlaceAtMe %08X 1", g_ghostBase);
                 // Diagnostic scan: how many refs are in the cell, how many match
                 // the guard base, how many are already claimed?
                 {
@@ -435,7 +494,7 @@ static void TickGhosts() {
                             if (!e->refr) continue;
                             ++total;
                             void* base = *(void**)((char*)e->refr + kRef_baseForm);
-                            if (base && *(uint32_t*)((char*)base + kForm_refID) == GHOST_BASE_NPC) {
+                            if (base && *(uint32_t*)((char*)base + kForm_refID) == g_ghostBase) {
                                 ++match;
                                 if (g_claimedFids.count(*(uint32_t*)((char*)e->refr + kForm_refID)))
                                     ++claimed;
@@ -451,11 +510,11 @@ static void TickGhosts() {
                 }
                 gh.spawnedMs    = now;
                 gh.phaseReadyMs = now + SPAWN_WAIT_MS;
-                EnqCmd("player.PlaceAtMe 1C34F 1");
+                EnqCmd(cmdBuf);
                 continue;
             }
 
-            void* ref = FindUnclaimedRefInCell(GHOST_BASE_NPC);
+            void* ref = FindUnclaimedRefInCell(g_ghostBase);
             if (!ref) continue;  // not in cell yet, try next frame
 
             uint32_t fid = *(uint32_t*)((char*)ref + Oblivion::kForm_refID);
@@ -466,17 +525,15 @@ static void TickGhosts() {
             g_spawnInFlight.clear();  // next queued ghost may spawn
 
             char buf[128];
-            snprintf(buf, sizeof(buf), "prid %08X", fid);
-            EnqCmd(buf);
-            EnqCmd("setrestrained 1");  // freeze AI so position writes stick
+            EnqRef(ref, "setrestrained 1");  // freeze AI so position writes stick
             // PvP servers get hittable ghosts; co-op keeps them intangible.
-            EnqCmd(g_pvp ? "setghost 0" : "setghost 1");
+            EnqRef(ref, g_pvp ? "setghost 0" : "setghost 1");
 
             // Apply player name with HP indicator (OBSE SetName — per-ref, doesn't affect base form)
             if (!gh.name.empty()) {
                 std::string nameStr = NameWithHp(gh.name, gh.hp);
                 snprintf(buf, sizeof(buf), "SetName \"%s\"", nameStr.c_str());
-                EnqCmd(buf);
+                EnqRef(ref, buf);
             }
 
             // Apply race if we know it (creates a per-ref change record)
@@ -484,19 +541,19 @@ static void TickGhosts() {
                 const char* raceEd = RaceEditorId(gh.raceFormId);
                 if (raceEd) {
                     snprintf(buf, sizeof(buf), "setrace %s", raceEd);
-                    EnqCmd(buf);
+                    EnqRef(ref, buf);
                 }
             }
 
-            // Guard base (0x1C34F) is male — toggle sex for female remote players.
+            // Base is typically male — toggle sex for female remote players.
             if (gh.gender == 1) {
-                EnqCmd("SexChange");
+                EnqRef(ref, "SexChange");
             }
 
             // Mirror the peer's real HP onto the actor (needed for PvP hit detection)
             if (gh.hp > 0 && gh.hp != 999) {
                 snprintf(buf, sizeof(buf), "setav health %d", gh.hp);
-                EnqCmd(buf);
+                EnqRef(ref, buf);
             }
             gh.lastActorHp     = -1.f;  // combat poll re-seeds from the live actor
             gh.hpSuppressUntil = now + 1500;
@@ -520,11 +577,8 @@ static void TickGhosts() {
         WriteRef(g_slotRefs[gh.slot], x, y, z, rotZ);
 
         if (gh.animGroup != gh.appliedAnim) {
-            uint32_t fid = *(uint32_t*)((char*)g_slotRefs[gh.slot] + Oblivion::kForm_refID);
-            char buf[64];
-            snprintf(buf, sizeof(buf), "prid %08X", fid);
-            EnqCmd(buf);
-            EnqCmd(std::string("PlayGroup ") + Oblivion::AnimGroupName(gh.animGroup) + " 1");
+            EnqRef(g_slotRefs[gh.slot],
+                   std::string("PlayGroup ") + Oblivion::AnimGroupName(gh.animGroup) + " 1");
             gh.appliedAnim = gh.animGroup;
         }
     }
@@ -549,11 +603,8 @@ void GhostSystem_Shutdown() {
         void* ref = g_slotRefs[gh.slot];
         if (ref) {
             uint32_t fid = *(uint32_t*)((char*)ref + Oblivion::kForm_refID);
-            char buf[64];
-            snprintf(buf, sizeof(buf), "prid %08X", fid);
-            EnqCmd(buf);
-            EnqCmd("disable");
-            EnqCmd("markfordelete");
+            EnqRef(ref, "disable");
+            EnqRef(ref, "markfordelete");
             g_claimedFids.erase(fid);
             g_slotRefs[gh.slot] = nullptr;
         }

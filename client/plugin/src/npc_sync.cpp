@@ -51,6 +51,56 @@ static std::unordered_map<uint32_t, int> g_authorityHp;  // follower: last hp re
 static std::mutex                 g_pendMtx;
 static std::vector<NpcHpEntry>    g_pendingHp;
 
+// Server-pushed ref operations. They arrive on the network thread with only a
+// refID; hex formID literals don't parse in the RunScriptLine path, so each op
+// is resolved to a live TESObjectREFR* via LookupFormByID on the game thread
+// and executed with the ref as calling context.
+struct RefOp {
+    enum Kind { Kill, KillSilent, RemoveItem, Damage } kind;
+    uint32_t refId;
+    uint32_t formId;  // RemoveItem
+    int      amount;  // RemoveItem count / Damage amount
+};
+static std::vector<RefOp> g_pendingOps;
+
+static void QueueRefOp(RefOp op) {
+    std::lock_guard<std::mutex> lk(g_pendMtx);
+    g_pendingOps.push_back(op);
+}
+
+static void ApplyPendingOps() {
+    std::vector<RefOp> ops;
+    {
+        std::lock_guard<std::mutex> lk(g_pendMtx);
+        std::swap(ops, g_pendingOps);
+    }
+    for (const RefOp& op : ops) {
+        void* ref = Oblivion::LookupFormByID(op.refId);
+        if (!ref) continue;  // not loaded on this client — nothing to mirror
+
+        char buf[64];
+        switch (op.kind) {
+        case RefOp::Kill:
+            GameHooks_EnqueueCmdOnRef(ref, "kill");
+            g_knownDead.insert(op.refId);
+            g_knownAlive.erase(op.refId);
+            break;
+        case RefOp::KillSilent:
+            GameHooks_EnqueueCmdOnRef(ref, "disable");
+            g_knownDead.insert(op.refId);
+            break;
+        case RefOp::RemoveItem:
+            snprintf(buf, sizeof(buf), "removeitem %08X %d", op.formId, op.amount);
+            GameHooks_EnqueueCmdOnRef(ref, buf);
+            break;
+        case RefOp::Damage:
+            snprintf(buf, sizeof(buf), "damageav health %d", op.amount);
+            GameHooks_EnqueueCmdOnRef(ref, buf);
+            break;
+        }
+    }
+}
+
 static void ResetCellState() {
     g_knownAlive.clear();
     g_knownDead.clear();
@@ -258,7 +308,9 @@ static void ApplyPendingHp(void* cell, const std::string& cellKey) {
 
         if (e.hp <= 0) {
             if (local > 0 && !g_knownDead.count(e.ref)) {
-                NpcSync_OnKilled(e.ref);  // prid + kill (death anim)
+                GameHooks_EnqueueCmdOnRef(it->second, "kill");  // death anim
+                g_knownDead.insert(e.ref);
+                g_knownAlive.erase(e.ref);
             }
             continue;
         }
@@ -273,10 +325,8 @@ static void ApplyPendingHp(void* cell, const std::string& cellKey) {
             g_network.send(buf);
         } else if (local != e.hp) {
             char buf[64];
-            snprintf(buf, sizeof(buf), "prid %X", e.ref);
-            GameHooks_EnqueueCmd(buf);
             snprintf(buf, sizeof(buf), "setav health %d", e.hp);
-            GameHooks_EnqueueCmd(buf);
+            GameHooks_EnqueueCmdOnRef(it->second, buf);
         }
     }
 }
@@ -301,6 +351,9 @@ void NpcSync_Tick(const std::string& cellKey) {
     void* cell = GetPlayerCell();
     if (!cell) return;
 
+    // Server-pushed ref ops (kills, loot removal, damage) — all clients
+    ApplyPendingOps();
+
     bool isAuthority;
     {
         std::lock_guard<std::mutex> lk(g_authMtx);
@@ -322,43 +375,22 @@ void NpcSync_Tick(const std::string& cellKey) {
 }
 
 void NpcSync_OnKilled(uint32_t refId) {
-    // Run `prid REFHEX; kill` — victim plays death animation
-    char buf[64];
-    snprintf(buf, sizeof(buf), "prid %X", refId);
-    GameHooks_EnqueueCmd(buf);
-    GameHooks_EnqueueCmd("kill");
-    g_knownDead.insert(refId);
-    g_knownAlive.erase(refId);
+    QueueRefOp({ RefOp::Kill, refId, 0, 0 });
 }
 
 void NpcSync_OnKillSync(const uint32_t* refs, int count) {
     // Cell entry sync — disable silently (no death anim)
-    for (int i = 0; i < count; ++i) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "prid %X", refs[i]);
-        GameHooks_EnqueueCmd(buf);
-        GameHooks_EnqueueCmd("disable");
-        g_knownDead.insert(refs[i]);
-    }
+    for (int i = 0; i < count; ++i)
+        QueueRefOp({ RefOp::KillSilent, refs[i], 0, 0 });
 }
 
 void NpcSync_OnItemSync(uint32_t containerRefId, uint32_t itemFormId, int count) {
-    // Remove items from the container on this client
-    char buf[128];
-    snprintf(buf, sizeof(buf), "prid %X", containerRefId);
-    GameHooks_EnqueueCmd(buf);
-    snprintf(buf, sizeof(buf), "removeitem %X %d", itemFormId, count);
-    GameHooks_EnqueueCmd(buf);
+    QueueRefOp({ RefOp::RemoveItem, containerRefId, itemFormId, count });
 }
 
 void NpcSync_OnContainerState(const ContainerEntry* entries, int count) {
-    for (int i = 0; i < count; ++i) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "prid %X", entries[i].refId);
-        GameHooks_EnqueueCmd(buf);
-        snprintf(buf, sizeof(buf), "removeitem %X %d", entries[i].formId, entries[i].count);
-        GameHooks_EnqueueCmd(buf);
-    }
+    for (int i = 0; i < count; ++i)
+        QueueRefOp({ RefOp::RemoveItem, entries[i].refId, entries[i].formId, entries[i].count });
 }
 
 void NpcSync_SetAuthority(const char* cellKey, bool authority) {
@@ -378,9 +410,5 @@ void NpcSync_OnHpSync(const NpcHpEntry* entries, int count) {
 
 void NpcSync_OnDamageRequest(uint32_t refId, int amount) {
     if (amount <= 0) return;
-    char buf[64];
-    snprintf(buf, sizeof(buf), "prid %X", refId);
-    GameHooks_EnqueueCmd(buf);
-    snprintf(buf, sizeof(buf), "damageav health %d", amount);
-    GameHooks_EnqueueCmd(buf);
+    QueueRefOp({ RefOp::Damage, refId, 0, amount });
 }

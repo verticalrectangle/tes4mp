@@ -3,7 +3,8 @@
 #include <cstdint>
 
 // Callback type for enqueuing a console command (thread-safe).
-typedef void (*GhostCmdFn)(const char* cmd);
+// refr: execute the line on this reference (null = global/console context).
+typedef void (*GhostCmdFn)(void* refr, const char* cmd);
 
 // numSlots : maximum concurrent ghost players
 // cmdFn    : thread-safe function to queue a console command for the next game tick

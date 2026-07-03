@@ -23,6 +23,12 @@ void GameHooks_Shutdown();
 // Used by ghost_system and other subsystems from any thread.
 void GameHooks_EnqueueCmd(const char* cmd);
 
+// Like GameHooks_EnqueueCmd, but the line executes ON the given reference
+// (RunScriptLine2 callingRefr — like RunBatchScript's run-on-ref mode).
+// Replaces prid chains: hex formID literals don't parse in this compile path.
+// refr must stay valid until the next game tick (~200ms).
+void GameHooks_EnqueueCmdOnRef(void* refr, const char* cmd);
+
 // Returns the player's current raw HP (from the last CHAR_SAVE checkpoint, 0 if unknown).
 int GameHooks_GetPlayerHp();
 

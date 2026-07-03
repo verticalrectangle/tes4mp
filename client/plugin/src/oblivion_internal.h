@@ -9,6 +9,17 @@ namespace Oblivion {
 // ── Player global ──────────────────────────────────────────────────────────────
 static constexpr uintptr_t kPlayerPtr = 0x00B333C4; // TESObjectREFR**
 
+// ── Engine functions (xOBSE bindings for 1.2.416) ─────────────────────────────
+// TESForm* LookupFormByID(UInt32 formId) — works for base forms and loaded refs.
+// Game thread only (reads the global form table).
+inline void* LookupFormByID(uint32_t formId) {
+    return ((void*(__cdecl*)(uint32_t))0x0046B250)(formId);
+}
+
+// DataHandler** — bound-object list at +0x000 (BoundObjectListHead{count,first,last}),
+// TESBoundObject links: next at +0x020. (GameData.h / xOBSE GameAPI.cpp)
+static constexpr uintptr_t kDataHandlerPtr = 0x00B33A98;
+
 // ── TESObjectREFR byte offsets ────────────────────────────────────────────────
 static constexpr ptrdiff_t kRef_flags      = 0x008; // UInt32 (TESForm::flags)
 static constexpr ptrdiff_t kRef_baseForm   = 0x01C; // TESForm*

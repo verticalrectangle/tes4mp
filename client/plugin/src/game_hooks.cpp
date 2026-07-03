@@ -34,7 +34,11 @@ static void DBG(const std::string& msg) {
 }
 
 // ── Game-thread command queue ──────────────────────────────────────────────────
-static std::queue<std::string> g_cmdQueue;
+struct QueuedCmd {
+    void*       refr;  // executes on this ref (null = global/console context)
+    std::string cmd;
+};
+static std::queue<QueuedCmd>   g_cmdQueue;
 static std::mutex              g_cmdMutex;
 static std::atomic<bool>       g_running{false};
 static std::thread             g_pollThread;
@@ -126,22 +130,27 @@ static std::vector<NpcHpEntry> ParseNpcHpArray(const std::string& s) {
 
 // ── Console command helpers ───────────────────────────────────────────────────
 
-static void RunCmd(const std::string& cmd) {
+static void RunCmd(const std::string& cmd, void* refr = nullptr) {
     if (!g_console) return;
-    bool ok = g_console->RunScriptLine2(cmd.c_str(), nullptr, true);
+    bool ok = g_console->RunScriptLine2(cmd.c_str(), (TESObjectREFR*)refr, true);
     if (!ok)
-        DBG("RunCmd FAILED: " + cmd);
+        DBG("RunCmd FAILED: " + cmd + (refr ? " (on ref)" : ""));
 }
 
 static void EnqueueCmd(const std::string& cmd) {
     std::lock_guard<std::mutex> lk(g_cmdMutex);
-    g_cmdQueue.push(cmd);
+    g_cmdQueue.push({ nullptr, cmd });
 }
 
 // Public API — used by ghost_system via the GhostCmdFn callback.
 void GameHooks_EnqueueCmd(const char* cmd) {
     std::lock_guard<std::mutex> lk(g_cmdMutex);
-    g_cmdQueue.push(cmd);
+    g_cmdQueue.push({ nullptr, cmd });
+}
+
+void GameHooks_EnqueueCmdOnRef(void* refr, const char* cmd) {
+    std::lock_guard<std::mutex> lk(g_cmdMutex);
+    g_cmdQueue.push({ refr, cmd });
 }
 
 // Sanitise a string for use inside a quoted console command argument.
@@ -965,7 +974,7 @@ void GameHooks_Init(OBSEInterface* obse, PluginHandle pluginHandle) {
 
     // Ghost system: slots filled dynamically via PlaceAtMe + cell scan on GHOST_APPEAR.
     // D3DHook_Init is deferred to PostLoadGame so it runs after DXVK/wined3d is ready.
-    GhostSystem_Init(GHOST_SLOTS, GameHooks_EnqueueCmd);
+    GhostSystem_Init(GHOST_SLOTS, GameHooks_EnqueueCmdOnRef);
 
     g_running    = true;
     g_pollThread = std::thread(PollLoop);
@@ -984,10 +993,10 @@ void GameHooks_Tick() {
         TickPendingCoc();
         std::lock_guard<std::mutex> lk(g_cmdMutex);
         while (!g_cmdQueue.empty()) {
-            std::string cmd = g_cmdQueue.front();
+            QueuedCmd qc = std::move(g_cmdQueue.front());
             g_cmdQueue.pop();
-            DBG("RunCmd: " + cmd);
-            RunCmd(cmd);
+            DBG("RunCmd: " + qc.cmd);
+            RunCmd(qc.cmd, qc.refr);
             DBG("RunCmd done");
         }
     }
