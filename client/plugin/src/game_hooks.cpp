@@ -286,7 +286,7 @@ static void TickPendingCoc() {
     }
     // "cow ..." (exterior worldspace teleport) passes through unchecked
     if (target.rfind("cow ", 0) == 0) {
-        BeginTransitionGuard(5000);  // no scans while the world streams in
+        BeginTransitionGuard(3000);  // scans pause while the world streams in
         EnqueueCmd(target);
         return;
     }
@@ -295,7 +295,7 @@ static void TickPendingCoc() {
         DBG("TickPendingCoc: already in " + target + ", skipping coc");
         return;
     }
-    BeginTransitionGuard(5000);
+    BeginTransitionGuard(3000);
     EnqueueCmd("coc \"" + target + "\"");
 }
 
@@ -308,6 +308,8 @@ std::string GameHooks_GetCellEditorId() {
     return g_cellEdCached;
 }
 
+// Strict gate — for memory WALKS only (cell lists, extra data, ghost refs).
+// These crash against a world mid-load/teardown.
 bool GameHooks_IsSafeToScan() {
     if (!InWorld()) return false;
     DWORD now = GetTickCount();
@@ -317,6 +319,13 @@ bool GameHooks_IsSafeToScan() {
     DWORD age = now - g_lastTickMs.load();
     if (age > 500) return false;
     return !g_menuModeCached.load();
+}
+
+// Loose gate — for console command execution. Commands don't walk memory;
+// they only need a live world. (Loading screens don't pump WM_TIMER, so the
+// tick — and therefore the queue — naturally stalls during real loads.)
+static bool SafeToRunCmds() {
+    return InWorld();
 }
 
 // ── Auth state machine ────────────────────────────────────────────────────────
@@ -537,7 +546,7 @@ static void TickChargen() {  // game thread only (IsMenuMode + console cmds)
         if (!c.startQuest.empty() && c.startStage > 0)
             EnqueueCmd("setstage " + c.startQuest + " " + std::to_string(c.startStage));
         if (!c.startCell.empty()) {
-            BeginTransitionGuard(5000);
+            BeginTransitionGuard(3000);
             EnqueueCmd("coc " + c.startCell);
         }
         c.stepMs = now;
@@ -1038,12 +1047,12 @@ void GameHooks_Tick() {
         }
     }
 
-    // Drain queued console commands only while the world is live — lines run
-    // right after a load fail silently (setstage) or crash (coc). They stay
-    // queued and run on the first live tick. Chargen menus are the exception:
-    // its Show*Menu chain must run while its own menus hold menu-mode.
-    if (GameHooks_IsSafeToScan() || ChargenActive()) {
-        TickPendingCoc();
+    // Drain queued console commands whenever a world exists. The strict scan
+    // gate used to sit here too — it froze messages/ghost setup for seconds
+    // after every teleport without actually fixing anything.
+    if (SafeToRunCmds() || ChargenActive()) {
+        // Teleports still wait for menus/loads to clear (coc mid-load crashes)
+        if (GameHooks_IsSafeToScan()) TickPendingCoc();
         std::lock_guard<std::mutex> lk(g_cmdMutex);
         while (!g_cmdQueue.empty()) {
             QueuedCmd qc = std::move(g_cmdQueue.front());
