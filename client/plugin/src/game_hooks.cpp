@@ -219,13 +219,23 @@ static bool InWorld() {
 }
 
 // Oblivion 1.2.416: bool IsMenuMode() — same routine xOBSE binds at 0x00578F60.
-// Game thread only.
+// Only safe to CALL from the SetTimer tick (message-pump/game thread, which
+// stalls during loads). The Present hook must not call engine code mid-load,
+// so it reads the cached sample below with a freshness check instead.
 static bool GameIsMenuMode() {
     return ((unsigned char(__cdecl*)())0x00578F60)() != 0;
 }
 
+static std::atomic<bool>  g_menuModeCached{true};
+static std::atomic<DWORD> g_lastTickMs{0};
+
 bool GameHooks_IsSafeToScan() {
-    return InWorld() && !GameIsMenuMode();
+    if (!InWorld()) return false;
+    // If the game tick hasn't run recently the game is loading (WM_TIMER
+    // doesn't pump) — treat as unsafe rather than trust a stale sample.
+    DWORD age = GetTickCount() - g_lastTickMs.load();
+    if (age > 500) return false;
+    return !g_menuModeCached.load();
 }
 
 // ── Auth state machine ────────────────────────────────────────────────────────
@@ -911,6 +921,10 @@ void GameHooks_Init(OBSEInterface* obse, PluginHandle pluginHandle) {
 }
 
 void GameHooks_Tick() {
+    // Refresh the scan-safety sample (engine call — safe here, on the pump thread)
+    g_menuModeCached.store(InWorld() ? GameIsMenuMode() : true);
+    g_lastTickMs.store(GetTickCount());
+
     // Drain queued console commands (game thread only)
     {
         std::lock_guard<std::mutex> lk(g_cmdMutex);
