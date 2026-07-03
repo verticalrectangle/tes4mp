@@ -502,6 +502,21 @@ def test_nan_position_dropped():
     a.close(); b.close()
 
 
+def test_start_cell_until_tutorial_done():
+    """Returning player with tutorial incomplete gets cell=ImperialSewers03 in
+    CHAR_LOAD (the returning-player client only teleports via `cell`)."""
+    token = fresh_token()
+    a = Client.connect_and_auth(token, "SewerBound")
+    a.close()  # no CHAR_SAVE sent → tutorial still incomplete
+    time.sleep(0.1)
+
+    b = Client()
+    b.send({"type": "HELLO", "token": token, "name": "SewerBound"})
+    pkt = b.expect("CHAR_LOAD")
+    assert pkt.get("cell") == "ImperialSewers03", f"start cell missing: {pkt.get('cell')}"
+    b.close()
+
+
 def test_rename_to_taken_name():
     """HELLO with a name another character owns must not error — keep old name."""
     a = Client.connect_and_auth(fresh_token(), "NameOwner")
@@ -922,6 +937,7 @@ def main():
             ("position: NaN dropped",      test_nan_position_dropped),
             ("auth: duplicate token",      test_duplicate_token_rejected),
             ("auth: taken-name rename",    test_rename_to_taken_name),
+            ("auth: start cell persists",  test_start_cell_until_tutorial_done),
             ("speed hack: rejection",      test_speed_hack_rejection),
             ("dungeon: clear broadcast",   test_dungeon_clear),
             ("weather: sync broadcast",    test_weather_sync),

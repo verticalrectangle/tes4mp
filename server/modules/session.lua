@@ -66,7 +66,6 @@ local function buildCharLoad(char, is_new, config)
         birthsign  = char.birthsign,
         gender     = tonumber(char.gender) or 0,
         level      = tonumber(char.level)  or 1,
-        cell       = char.last_cell,
         skills     = skills,
         attributes = attrs,
         health     = tonumber(vitals.health)  or 100,
@@ -76,10 +75,15 @@ local function buildCharLoad(char, is_new, config)
         infamy     = tonumber(vitals.infamy)  or 0,
         gold       = tonumber(vitals.gold)    or 100,
         bounties   = bounties,
-        -- Tutorial skip — sent on every login until server marks it complete
+        -- Tutorial skip — sent on every login until server marks it complete.
+        -- Also mirrored into `cell`: the returning-player client path only
+        -- teleports via `cell`, and a reconnect before the first CHAR_SAVE
+        -- must still deliver the start teleport.
         start_cell        = (tonumber(char.tutorial_complete) or 0) == 0 and "ImperialSewers03"    or nil,
         start_quest       = (tonumber(char.tutorial_complete) or 0) == 0 and "MQ01"               or nil,
         start_quest_stage = (tonumber(char.tutorial_complete) or 0) == 0 and 90                   or nil,
+        cell              = (tonumber(char.tutorial_complete) or 0) == 0 and "ImperialSewers03"
+                            or (char.last_cell ~= "" and char.last_cell or nil),
     })
     return skills, attrs, pkt
 end
