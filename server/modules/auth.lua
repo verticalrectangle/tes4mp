@@ -43,7 +43,8 @@ function M.handleHello(sock, info, pkt, config)
     end
     if char then
         local name = tostring(pkt.name or ""):match("^%s*(.-)%s*$")
-        if #name >= 2 and #name <= 24 and name ~= char.name then
+        if #name >= 2 and #name <= 24 and name ~= char.name
+                and not store.getCharacterByName(name) then  -- names are UNIQUE
             store.updateCharacterName(tonumber(char.id), name)
             char.name = name
             print(("[auth] HELLO → renamed char to %s"):format(name))

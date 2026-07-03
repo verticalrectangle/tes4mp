@@ -502,6 +502,25 @@ def test_nan_position_dropped():
     a.close(); b.close()
 
 
+def test_rename_to_taken_name():
+    """HELLO with a name another character owns must not error — keep old name."""
+    a = Client.connect_and_auth(fresh_token(), "NameOwner")
+    a.close()
+    time.sleep(0.1)
+
+    token = fresh_token()
+    b = Client.connect_and_auth(token, "SomeoneElse")
+    b.close()
+    time.sleep(0.1)
+
+    # Reconnect b claiming the taken name — must still get CHAR_LOAD, unrenamed
+    c = Client()
+    c.send({"type": "HELLO", "token": token, "name": "NameOwner"})
+    pkt = c.expect("CHAR_LOAD")
+    assert pkt.get("name") == "SomeoneElse", f"rename collision mishandled: {pkt.get('name')}"
+    c.close()
+
+
 def test_duplicate_token_rejected():
     """Second HELLO with an in-use token → KICK with guidance, first stays online."""
     token = fresh_token()
@@ -902,6 +921,7 @@ def main():
             ("char_save: zero stats gate", test_zero_stats_rejected),
             ("position: NaN dropped",      test_nan_position_dropped),
             ("auth: duplicate token",      test_duplicate_token_rejected),
+            ("auth: taken-name rename",    test_rename_to_taken_name),
             ("speed hack: rejection",      test_speed_hack_rejection),
             ("dungeon: clear broadcast",   test_dungeon_clear),
             ("weather: sync broadcast",    test_weather_sync),
