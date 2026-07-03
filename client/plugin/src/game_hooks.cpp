@@ -520,10 +520,6 @@ static void ChargenCancel() {
     g_chargen.step = ChargenState::Inactive;
 }
 
-static bool ChargenActive() {
-    std::lock_guard<std::mutex> lk(g_chargenMtx);
-    return g_chargen.step != ChargenState::Inactive;
-}
 
 static void TickChargen() {  // game thread only (IsMenuMode + console cmds)
     std::lock_guard<std::mutex> lk(g_chargenMtx);
@@ -1047,10 +1043,13 @@ void GameHooks_Tick() {
         }
     }
 
-    // Drain queued console commands whenever a world exists. The strict scan
-    // gate used to sit here too — it froze messages/ghost setup for seconds
-    // after every teleport without actually fixing anything.
-    if (SafeToRunCmds() || ChargenActive()) {
+    // Drain queued console commands when a world exists AND no menu is up:
+    // lines executed while a (chargen) menu is open fail and are lost —
+    // starting gold, tutorial stage and quest sync all vanished that way.
+    // They queue and run on the first menu-free tick instead. Chargen's own
+    // Show*Menu commands are always enqueued while menus are closed, so no
+    // exception is needed.
+    if (SafeToRunCmds() && !g_menuModeCached.load()) {
         // Teleports still wait for menus/loads to clear (coc mid-load crashes)
         if (GameHooks_IsSafeToScan()) TickPendingCoc();
         std::lock_guard<std::mutex> lk(g_cmdMutex);

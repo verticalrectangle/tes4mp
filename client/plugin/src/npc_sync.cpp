@@ -40,6 +40,9 @@ static std::unordered_set<uint32_t> g_knownDead;    // refIds we've already repo
 // Container snapshot: containerRefId → { itemFormId → countTaken }
 static std::unordered_map<uint32_t, std::unordered_map<uint32_t, int>> g_containerSnapshot;
 
+// Follower damage detection: last locally observed hp per NPC ref
+static std::unordered_map<uint32_t, int> g_prevLocalHp;
+
 // ── Authority state (server-assigned per cell) ────────────────────────────────
 
 static std::mutex   g_authMtx;
@@ -107,6 +110,7 @@ static void ResetCellState() {
     g_containerSnapshot.clear();
     g_sentHp.clear();
     g_authorityHp.clear();
+    g_prevLocalHp.clear();
     std::lock_guard<std::mutex> lk(g_pendMtx);
     g_pendingHp.clear();
 }
@@ -138,7 +142,7 @@ static void WalkCellRefs(void* cell, Fn cb) {
 
 // ── NPC kill scan (~1s) ───────────────────────────────────────────────────────
 
-static void ScanNpcKills(void* cell, const std::string& cellKey) {
+static void ScanNpcKills(void* cell, const std::string& cellKey, bool isAuthority) {
     WalkCellRefs(cell, [&](void* ref, uint32_t refId) {
         // Skip player, ghosts, dynamic refs (formId > 0xFF000000 = runtime-placed)
         if (refId == 0) return true;
@@ -156,6 +160,22 @@ static void ScanNpcKills(void* cell, const std::string& cellKey) {
         if (g_knownDead.count(refId)) return true;
 
         float hp = GetActorHp(ref);
+
+        // Follower: report our local damage proactively. The authority only
+        // broadcasts NPC_HP when ITS copy changes, so damage dealt by a
+        // non-authority player would otherwise never merge.
+        if (!isAuthority && hp > 0.f) {
+            auto it = g_prevLocalHp.find(refId);
+            if (it != g_prevLocalHp.end() && (int)hp < it->second - 1) {
+                char buf[112];
+                snprintf(buf, sizeof(buf),
+                    "{\"type\":\"NPC_DAMAGE\",\"cell\":\"%s\",\"ref_id\":%u,\"amount\":%d}",
+                    cellKey.c_str(), refId, it->second - (int)hp);
+                g_network.send(buf);
+            }
+            g_prevLocalHp[refId] = (int)hp;
+        }
+
         if (hp > 0.f) {
             g_knownAlive.insert(refId);
         } else if (g_knownAlive.count(refId)) {
@@ -362,7 +382,7 @@ void NpcSync_Tick(const std::string& cellKey) {
 
     if (now - g_lastNpcMs >= 1000) {
         g_lastNpcMs = now;
-        ScanNpcKills(cell, cellKey);
+        ScanNpcKills(cell, cellKey, isAuthority);
         if (isAuthority) ScanNpcHpAsAuthority(cell, cellKey);
     }
 
