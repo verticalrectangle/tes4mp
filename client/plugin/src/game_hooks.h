@@ -26,3 +26,7 @@ void GameHooks_EnqueueCmd(const char* cmd);
 // Returns the player's current raw HP (from the last CHAR_SAVE checkpoint, 0 if unknown).
 int GameHooks_GetPlayerHp();
 
+// True when it's safe to walk engine object lists: in-world and not in
+// menu mode (loading screens count as menus — cell lists mutate during them).
+bool GameHooks_IsSafeToScan();
+

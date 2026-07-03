@@ -14,13 +14,11 @@
 #include <vector>
 
 // ── Cell object list walk ─────────────────────────────────────────────────────
-// TESObjectCELL linked list of refs sits at cell+0x048.
-// Same layout used by ghost_system FindUnclaimedRefInCell.
-// Each node: void* at +0x000 = next, void* at +0x008 = TESObjectREFR*
+// TESObjectCELL::ObjectListEntry objectList is EMBEDDED at cell+0x048
+// (GameForms.h): { TESObjectREFR* refr; ObjectListEntry* next; }.
+// Matches ghost_system FindUnclaimedRefInCell.
 
-static constexpr ptrdiff_t kCell_refList      = 0x048; // BSSimpleList<TESObjectREFR*> head
-static constexpr ptrdiff_t kCellNode_next     = 0x000;
-static constexpr ptrdiff_t kCellNode_ref      = 0x008;
+static constexpr ptrdiff_t kCell_refList = 0x048; // embedded ObjectListEntry head
 
 // ── getAV vtable dispatch — slot 0xA1, AV code 8 = Health ────────────────────
 static float GetActorHp(void* actor) {
@@ -78,14 +76,13 @@ static void* GetPlayerCell() {
 // Iterate all refs in a cell, calling cb(ref, refId). Stop if cb returns false.
 template<typename Fn>
 static void WalkCellRefs(void* cell, Fn cb) {
-    void* node = *(void**)((char*)cell + kCell_refList);
-    while (node) {
-        void* ref = *(void**)((char*)node + kCellNode_ref);
+    struct OLE { void* refr; OLE* next; };
+    for (OLE* e = reinterpret_cast<OLE*>((char*)cell + kCell_refList); e; e = e->next) {
+        void* ref = e->refr;
         if (ref) {
             uint32_t refId = *(uint32_t*)((char*)ref + Oblivion::kForm_refID);
             if (!cb(ref, refId)) return;
         }
-        node = *(void**)((char*)node + kCellNode_next);
     }
 }
 
@@ -287,17 +284,22 @@ static void ApplyPendingHp(void* cell, const std::string& cellKey) {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 void NpcSync_Tick(const std::string& cellKey) {
+    static DWORD cellSettleMs = 0;
+
+    DWORD now = GetTickCount();
+
     if (cellKey != g_cellKey) {
         g_cellKey = cellKey;
         ResetCellState();
+        cellSettleMs = now;
     }
 
     if (cellKey.empty()) return;
+    // Let the cell finish streaming in before touching its object list.
+    if (now - cellSettleMs < 2000) return;
 
     void* cell = GetPlayerCell();
     if (!cell) return;
-
-    DWORD now = GetTickCount();
 
     bool isAuthority;
     {

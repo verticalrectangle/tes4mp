@@ -1,4 +1,5 @@
 #include "ghost_system.h"
+#include "game_hooks.h"
 #include "oblivion_internal.h"
 #include <windows.h>
 #include <string>
@@ -397,6 +398,11 @@ static void TickGhosts() {
     DWORD now      = GetTickCount();
     DWORD renderMs = (now > INTERP_DELAY) ? now - INTERP_DELAY : 0;
 
+    // Cell object lists mutate during loading screens — never scan or spawn
+    // there. Position writes on already-claimed refs are skipped too: the refs
+    // may be mid-teardown during a cell transition.
+    if (!GameHooks_IsSafeToScan()) return;
+
     for (auto& [charId, gh] : g_ghosts) {
         if (gh.phase == Phase::Spawning) {
             // Serialize spawns: only the in-flight ghost may place and scan.
@@ -416,7 +422,33 @@ static void TickGhosts() {
 
             // Retry if we've been waiting too long (command may have been missed).
             if (now - gh.spawnedMs > SPAWN_TIMEOUT) {
-                GS_DBG("spawn timeout for " + charId + ", retrying PlaceAtMe");
+                // Diagnostic scan: how many refs are in the cell, how many match
+                // the guard base, how many are already claimed?
+                {
+                    using namespace Oblivion;
+                    int total = 0, match = 0, claimed = 0;
+                    void* player = *(void**)kPlayerPtr;
+                    void* cell = player ? *(void**)((char*)player + kRef_parentCell) : nullptr;
+                    if (cell) {
+                        struct OLE { void* refr; OLE* next; };
+                        for (OLE* e = reinterpret_cast<OLE*>((char*)cell + 0x048); e; e = e->next) {
+                            if (!e->refr) continue;
+                            ++total;
+                            void* base = *(void**)((char*)e->refr + kRef_baseForm);
+                            if (base && *(uint32_t*)((char*)base + kForm_refID) == GHOST_BASE_NPC) {
+                                ++match;
+                                if (g_claimedFids.count(*(uint32_t*)((char*)e->refr + kForm_refID)))
+                                    ++claimed;
+                            }
+                        }
+                    }
+                    GS_DBG("spawn timeout for " + charId
+                           + " — cell=" + std::to_string((uintptr_t)cell)
+                           + " refs=" + std::to_string(total)
+                           + " guardBase=" + std::to_string(match)
+                           + " claimed=" + std::to_string(claimed)
+                           + ", retrying PlaceAtMe");
+                }
                 gh.spawnedMs    = now;
                 gh.phaseReadyMs = now + SPAWN_WAIT_MS;
                 EnqCmd("player.PlaceAtMe 1C34F 1");
