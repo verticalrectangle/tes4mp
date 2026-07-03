@@ -205,6 +205,88 @@ Closed DLL-only in `quest_sync.cpp`:
 **Playtest needed:** advance MQ on client A → B gets the stage; guild quest stays
 party-only; offline progress uploads on next join.
 
+### WP9 — Dynamic spawn mirroring, v1 "shared fate" (in progress)
+
+**Problem.** Leveled/dynamic spawns (most dungeon creatures) are rolled per
+client with client-local FF refIDs: no shared identity, so players fight
+different creatures or don't see each other's at all. Static refs (00 index)
+already sync by refID.
+
+**Model (option B — local AI, shared fate):**
+- The cell authority enumerates its live dynamic actors (~2s) and broadcasts
+  `NPC_SPAWNS {cell, spawns:[{sid, base, x, y, z, hp}]}` — a full snapshot,
+  `sid` = the authority's local refID (opaque shared key), `base` = rolled
+  creature base formID (vanilla index only).
+- Followers **suppress** their own rolled dynamic actors (disable, once) and
+  host **replicas**: one spawn per new sid, placed at the authority's coords,
+  then driven by the follower's OWN AI (real combat feel; positions may
+  drift between screens — accepted in v1).
+- Fate flows authority→follower: snapshot hp applied to replicas (setav);
+  sid disappearing or hp<=0 kills/removes the replica. v1 does NOT merge
+  follower damage on replicas back (documented gap; needs sid-keyed
+  NPC_DAMAGE and a replica hp poll).
+- Authority handover: new authority has different refIDs → its first
+  snapshot replaces everything (followers wipe and rebuild replicas).
+
+**Spawn primitive** (the hard part — hex formID literals with A–F digits
+don't parse in the RunScriptLine path):
+1. Multi-line temp script: `ref r / let r := GetFormFromMod "Oblivion.esm"
+   <decimal id> / player.PlaceAtMe r 1` (OBSE expression compiler).
+2. Fallback: `player.PlaceAtMe %08X 1` — works only when the hex happens to
+   be all decimal digits (how ghosts spawn today, base 00096765).
+3. Give up + log. Each attempt is verified by the claim scan (newest
+   unclaimed FF ref with the right base), so tes4mp_debug.txt records which
+   strategy actually works in-game — check it after the first playtest.
+
+**Server:** relay NPC_SPAWNS from the cell authority only (mirrors NPC_HP
+validation); integration test for relay + non-authority rejection.
+
+**Also:** stage-parity — world content is enabled/disabled by quest stage, so
+stage divergence makes spawns invisible to one player (the "only I saw the
+rat" bug had this as a co-cause). QUEST_SYNC is re-sent on every cell
+transition, not just login.
+
+### WP10 — Full puppet NPC mirroring (option A) — PLAN ONLY, for future agents
+
+Upgrade path from WP9; do not start until WP9 is verified in-game.
+
+**Goal.** One shared reality: every synced NPC is at the same position doing
+the same thing on all screens, like player ghosts.
+
+**Architecture (A = WP9 + position streaming + AI freeze):**
+1. Authority streams `NPC_POS {cell, npcs:[{sid, x, y, z, rot, anim}]}` at
+   2–5 Hz for dynamic replicas AND static actors in combat. Reuse the ghost
+   snapshot ring + interpolation (extract ghost interp into a shared
+   helper — do not fork the code).
+2. Followers put mirrored actors in puppet mode: `setrestrained 1` (their
+   AI off) and drive positions via the ghost WriteRef path per frame.
+   Puppets must NOT be `setghost` — players need to hit them.
+3. Follower hits on puppets: poll actor hp like GhostSystem_PollHits, send
+   sid-keyed NPC_DAMAGE; authority applies (its actor is live AI), result
+   returns via NPC_POS/NPC_HP.
+4. Combat targeting: puppets never attack followers (restrained). Mitigate:
+   authority also streams target info (`tsid`/char_id) so followers can play
+   attack anims via PlayGroup toward the right victim; real threat for
+   followers comes only when they hold authority. This is A's fundamental
+   compromise — document it in the server MOTD/README.
+5. Bandwidth: cap streamed actors (nearest N=8 to any player), send deltas
+   only, drop to 1 Hz when no player within ~2000 units.
+6. Handover: identical to WP9 (snapshot replace), plus followers must exit
+   puppet mode (`setrestrained 0`) for actors the new authority doesn't
+   stream.
+
+**Prerequisites discovered the hard way (read before coding):**
+- No hex-with-letters literals in RunScriptLine commands; refs go via
+  RunScriptLine2 callingRefr (see WP7/WP9), forms via GetFormFromMod.
+- All memory walks gated on GameHooks_IsSafeToScan(); teleports raise a
+  transition guard. Never gate the command queue on more than menu-mode.
+- Present-hook code must not call engine functions (cache on the tick).
+- Verify every engine offset against the local OBSE SDK headers or xOBSE
+  sources; 0x1C34F-style "known" constants have been wrong before.
+
+**Definition of done:** two clients watch the same bandit pace the same
+patrol; either player can kill it; the corpse lies in the same spot for both.
+
 ## Explicitly out of scope (this round)
 
 - **NPC position/AI mirroring** — the deep rabbit hole; kill+HP sync gives shared

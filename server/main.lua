@@ -149,6 +149,9 @@ local function handlePacket(sock, info, raw)
 
     elseif t == "TP_REQUEST" then
         world.handleTpRequest(cid)
+
+    elseif t == "NPC_SPAWNS" then
+        world.handleNpcSpawns(cid, pkt)
     end
 end
 

@@ -1,6 +1,7 @@
 #include "game_hooks.h"
 #include "ghost_system.h"
 #include "npc_sync.h"
+#include "npc_spawn_sync.h"
 #include "equip_sync.h"
 #include "quest_sync.h"
 #include "d3d_hook.h"
@@ -101,6 +102,30 @@ static std::vector<std::string> ParseStrArray(const std::string& s, const char* 
         if (q2 == std::string::npos || q2 > end) break;
         out.push_back(s.substr(q1 + 1, q2 - q1 - 1));
         i = q2;
+    }
+    return out;
+}
+
+// Parse NPC_SPAWNS payload: "spawns":[{"sid":..,"base":..,"x":..,"y":..,"z":..,"hp":..},...]
+static std::vector<SpawnEntry> ParseSpawnArray(const std::string& s) {
+    std::vector<SpawnEntry> out;
+    size_t p = s.find("\"spawns\"");
+    if (p == std::string::npos) return out;
+    while (true) {
+        size_t sp = s.find("\"sid\"", p);
+        if (sp == std::string::npos) break;
+        size_t objEnd = s.find('}', sp);
+        if (objEnd == std::string::npos) break;
+        std::string obj = s.substr(sp, objEnd - sp);
+        SpawnEntry e{};
+        e.sid  = (uint32_t)strtoul(obj.c_str() + 6, nullptr, 10);
+        e.base = (uint32_t)(int)JF(obj, "base");
+        e.x    = JF(obj, "x");
+        e.y    = JF(obj, "y");
+        e.z    = JF(obj, "z");
+        e.hp   = (int)JF(obj, "hp");
+        if (e.sid && e.base) out.push_back(e);
+        p = objEnd;
     }
     return out;
 }
@@ -944,6 +969,12 @@ static void PollLoop() {
                 auto npcs = ParseNpcHpArray(pkt.raw);
                 if (!npcs.empty())
                     NpcSync_OnHpSync(npcs.data(), (int)npcs.size());
+                break;
+            }
+
+            case PacketType::NpcSpawns: {
+                auto spawns = ParseSpawnArray(pkt.raw);
+                NpcSpawnSync_OnSnapshot(spawns.data(), (int)spawns.size());
                 break;
             }
 

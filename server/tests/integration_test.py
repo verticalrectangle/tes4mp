@@ -827,6 +827,45 @@ def test_npc_damage_routing():
     a.close(); b.close(); c.close()
 
 
+def test_npc_spawns_relay():
+    """Authority's NPC_SPAWNS relayed to cell peers; non-authority's dropped;
+    invalid entries filtered."""
+    a = Client.connect_and_auth(fresh_token(), "SpawnAuth")
+    b = Client.connect_and_auth(fresh_token(), "SpawnPeer")
+
+    cell_key = "141001"
+    put_in_cell(a, 0, 0, 0, cell=int(cell_key))   # a = authority
+    put_in_cell(b, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    a.recv_all(0.2); b.recv_all(0.2)
+
+    a.send({"type": "NPC_SPAWNS", "cell": cell_key, "spawns": [
+        {"sid": 0xFF001234, "base": 0x23AB5, "x": 10, "y": 20, "z": 0, "hp": 25},
+        {"sid": 5, "base": 0x23AB5, "x": 0, "y": 0, "z": 0, "hp": 25},        # static sid: filtered
+        {"sid": 0xFF001235, "base": 0x0100AAAA, "x": 0, "y": 0, "z": 0, "hp": 9},  # mod base: filtered
+    ]})
+    pkt = b.expect("NPC_SPAWNS")
+    spawns = pkt.get("spawns", [])
+    assert len(spawns) == 1 and spawns[0]["sid"] == 0xFF001234, f"filtering wrong: {spawns}"
+
+    # Non-authority snapshots must not relay
+    b.send({"type": "NPC_SPAWNS", "cell": cell_key,
+            "spawns": [{"sid": 0xFF009999, "base": 100, "x": 0, "y": 0, "z": 0, "hp": 5}]})
+    a.expect_none("NPC_SPAWNS", timeout=0.4)
+
+    a.close(); b.close()
+
+
+def test_quest_sync_on_cell_entry():
+    """Entering a cell re-sends QUEST_SYNC (stage parity guard)."""
+    a = Client.connect_and_auth(fresh_token(), "StageParity")
+    a.recv_all(0.3)  # drain login packets (includes the login QUEST_SYNC)
+    put_in_cell(a, 0, 0, 0, cell=142001)
+    pkt = a.expect("QUEST_SYNC")
+    assert "quests" in pkt, f"quest sync missing on cell entry: {pkt}"
+    a.close()
+
+
 def test_pvp_hit():
     """PLAYER_HIT → target gets DAMAGE_TAKEN (pvp:true in test config), clamped to 100."""
     a = Client.connect_and_auth(fresh_token(), "PvpAttacker")
@@ -981,6 +1020,8 @@ def main():
             ("authority: handover",        test_cell_authority_handover),
             ("npc_hp: relay + gate",       test_npc_hp_relay),
             ("npc_damage: routing",        test_npc_damage_routing),
+            ("npc_spawns: relay + filter", test_npc_spawns_relay),
+            ("quests: sync on cell entry", test_quest_sync_on_cell_entry),
             ("pvp: hit routed + clamped",  test_pvp_hit),
             ("pvp: disabled gate",         test_pvp_disabled_gate),
         ]

@@ -19,6 +19,7 @@ add_library(TES4MP SHARED
     src/npc_sync.cpp
     src/equip_sync.cpp
     src/quest_sync.cpp
+    src/npc_spawn_sync.cpp
 )
 
 target_include_directories(TES4MP PRIVATE

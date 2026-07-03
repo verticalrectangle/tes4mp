@@ -1,4 +1,5 @@
 #include "npc_sync.h"
+#include "npc_spawn_sync.h"
 #include "oblivion_internal.h"
 #include "ghost_system.h"
 #include "game_hooks.h"
@@ -392,6 +393,9 @@ void NpcSync_Tick(const std::string& cellKey) {
         g_lastContMs = now;
         ScanContainerLoots(cell, cellKey);
     }
+
+    // WP9: dynamic spawn mirroring (authority broadcast / follower replicas)
+    NpcSpawnSync_Tick(cellKey, isAuthority);
 }
 
 void NpcSync_OnKilled(uint32_t refId) {

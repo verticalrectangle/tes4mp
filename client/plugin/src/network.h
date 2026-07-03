@@ -62,6 +62,7 @@ enum class PacketType : int {
     NpcHp           = 42,  // authority NPC health batch — cell + npcs array in raw
     NpcDamage       = 43,  // damage request routed to us (authority) — ref_id/amount in raw
     DamageTaken     = 44,  // PvP damage to apply — intField = amount, strField = attacker name
+    NpcSpawns       = 45,  // authority dynamic spawn snapshot — raw JSON
 };
 
 struct Packet {

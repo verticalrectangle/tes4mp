@@ -191,6 +191,12 @@ function M.handlePositionUpdate(char_id, pkt)
             if #containers > 0 then
                 session.sendTo(char_id, json.encode({ type = "CONTAINER_STATE", containers = containers }))
             end
+
+            -- Stage parity: world content is enabled/disabled by quest stage,
+            -- so drifted stages make spawns invisible to one player. Re-sync
+            -- on every cell entry, not just login.
+            local quests = require("server.modules.quests")
+            quests.syncToChar(char_id)
         end
     end
 
@@ -564,6 +570,38 @@ function M.handleNpcHp(char_id, pkt)
 
     session.broadcastToCell(cell,
         json.encode({ type = "NPC_HP", cell = cell, npcs = npcs }), char_id)
+end
+
+-- WP9: authority broadcasts its dynamic spawn snapshot; relay to the cell.
+function M.handleNpcSpawns(char_id, pkt)
+    local json = require("cjson")
+    local cell = tostring(pkt.cell or "")
+    if cell == "" or type(pkt.spawns) ~= "table" then return end
+
+    local sess = session.getByCharId(char_id)
+    if not sess or sess.cell ~= cell then return end
+    if authorities[cell] ~= char_id then return end  -- authority only
+
+    local spawns = {}
+    for _, e in ipairs(pkt.spawns) do
+        if type(e) == "table" then
+            local sid  = math.floor(tonumber(e.sid) or 0)
+            local base = math.floor(tonumber(e.base) or 0)
+            local hp   = math.floor(tonumber(e.hp) or 0)
+            local x, y, z = finite(e.x), finite(e.y), finite(e.z)
+            -- dynamic sids only; vanilla bases only (mod index 00)
+            if sid > 0xFF000000 and base > 0 and base < 0x01000000
+               and hp > 0 and x and y and z then
+                spawns[#spawns + 1] = { sid = sid, base = base, x = x, y = y, z = z, hp = hp }
+            end
+        end
+        if #spawns >= 24 then break end
+    end
+
+    session.broadcastToCell(cell, json.encode({
+        type = "NPC_SPAWNS", cell = cell,
+        spawns = (#spawns > 0) and spawns or json.decode("[]"),
+    }), char_id)
 end
 
 function M.handleNpcDamage(char_id, pkt)
