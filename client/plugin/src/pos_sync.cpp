@@ -91,8 +91,18 @@ static int ClassifyAnim(const PlayerState& now, const PlayerState& last, float d
     float speed = (dtSec > 0.f) ? dist / dtSec : 0.f;
     float drot  = (dtSec > 0.f) ? (now.rotZ - last.rotZ) / dtSec : 0.f;
 
-    if (speed >= Oblivion::kSpeed_Run)  return Oblivion::kAnim_FastForward;
-    if (speed >= Oblivion::kSpeed_Walk) return Oblivion::kAnim_Forward;
+    // Movement direction vs facing: rotZ 0 = +Y (north), clockwise.
+    // Negative dot = backpedaling — else ghosts moonwalk when players back up.
+    bool backward = false;
+    if (dist > 0.01f) {
+        float fx = std::sin(now.rotZ), fy = std::cos(now.rotZ);
+        backward = (dx * fx + dy * fy) < 0.f;
+    }
+
+    if (speed >= Oblivion::kSpeed_Run)
+        return backward ? Oblivion::kAnim_FastBack : Oblivion::kAnim_FastForward;
+    if (speed >= Oblivion::kSpeed_Walk)
+        return backward ? Oblivion::kAnim_Backward : Oblivion::kAnim_Forward;
     if (std::abs(drot) > 0.5f)
         return (drot > 0.f) ? Oblivion::kAnim_TurnLeft : Oblivion::kAnim_TurnRight;
     return Oblivion::kAnim_Idle;
