@@ -28,6 +28,16 @@ function M.handleHello(sock, info, pkt, config)
     end
 
     local char = store.getCharByToken(token)
+    if char and session.getByCharId(tonumber(char.id)) then
+        -- Same token, second connection: almost always a copied install.
+        -- Reject loudly instead of letting two players fight over one session.
+        send(sock, { type = "KICK",
+            reason = "This character is already online. Each player needs their own "
+                  .. "token - if you copied an install, delete "
+                  .. "AppData\\Roaming\\TES4MP\\token.txt and reconnect." })
+        print(("[auth] rejected duplicate login for char=%s"):format(char.name))
+        return
+    end
     if char then
         local name = tostring(pkt.name or ""):match("^%s*(.-)%s*$")
         if #name >= 2 and #name <= 24 and name ~= char.name then

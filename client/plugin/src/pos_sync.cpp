@@ -101,6 +101,11 @@ static void PollThread() {
         PlayerState now = SamplePlayer();
         DWORD nowMs = GetTickCount();
 
+        // Loading screens can yield NaN/Inf position reads — treat as no sample.
+        if (now.valid && !(std::isfinite(now.x) && std::isfinite(now.y)
+                           && std::isfinite(now.z) && std::isfinite(now.rotZ)))
+            now.valid = false;
+
         if (now.valid) {
             {
                 std::lock_guard<std::mutex> lk(g_localMtx);

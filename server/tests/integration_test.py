@@ -480,6 +480,45 @@ def test_zero_stats_rejected():
     b.close()
 
 
+def test_nan_position_dropped():
+    """POSITION_UPDATE with NaN coords must be dropped, not crash the encoder."""
+    a = Client.connect_and_auth(fresh_token(), "NanSender")
+    b = Client.connect_and_auth(fresh_token(), "NanWatcher")
+
+    put_in_cell(b, 0, 0, 0, cell=121001)
+    b.recv_all(0.2)
+
+    # json.dumps emits the literal NaN (lua-cjson decodes it, but refuses to re-encode)
+    a.send({"type": "POSITION_UPDATE",
+            "x": float("nan"), "y": 0, "z": 0,
+            "rot": 0, "cell": 121001, "ws": 0, "anim": 0, "hp": 100})
+    b.expect_none("GHOST_APPEAR", timeout=0.4)
+
+    # Server must still be healthy: a valid update from A now goes through
+    put_in_cell(a, 5, 0, 0, cell=121001)
+    pkt = b.expect("GHOST_APPEAR")
+    assert pkt.get("char_name") == "NanSender", f"server unhealthy after NaN: {pkt}"
+
+    a.close(); b.close()
+
+
+def test_duplicate_token_rejected():
+    """Second HELLO with an in-use token → KICK with guidance, first stays online."""
+    token = fresh_token()
+    a = Client.connect_and_auth(token, "TokenOwner")
+
+    b = Client()
+    b.send({"type": "HELLO", "token": token, "name": "TokenThief"})
+    pkt = b.expect("KICK")
+    assert "already online" in pkt.get("reason", ""), f"wrong reason: {pkt}"
+    b.close()
+
+    # A's session must be unaffected
+    a.send({"type": "PING"})
+    a.expect("PONG")
+    a.close()
+
+
 def test_speed_hack_rejection():
     """POSITION_UPDATE with impossible speed → peer does NOT get PLAYER_POS."""
     a = Client.connect_and_auth(fresh_token(), "Speedhacker")
@@ -861,6 +900,8 @@ def main():
             ("char_save: skill clamp",     test_char_save_skill_clamp),
             ("char_save: level clamp",     test_char_save_level_clamp),
             ("char_save: zero stats gate", test_zero_stats_rejected),
+            ("position: NaN dropped",      test_nan_position_dropped),
+            ("auth: duplicate token",      test_duplicate_token_rejected),
             ("speed hack: rejection",      test_speed_hack_rejection),
             ("dungeon: clear broadcast",   test_dungeon_clear),
             ("weather: sync broadcast",    test_weather_sync),

@@ -138,3 +138,22 @@ The built `TES4MP.dll` is automatically copied to your Oblivion folder if the in
 
 - Appearance sync applied to ghosts (race/hair/face morphs not yet written to the ref)
 - Combat sync
+
+## Troubleshooting
+
+**"This character is already online" / you and a friend keep becoming each other's character**
+Your identity is a token in `AppData\Roaming\TES4MP\token.txt` (inside the Wine
+prefix on Linux: `<prefix>/drive_c/users/<user>/AppData/Roaming/TES4MP/`).
+If you copied an install (or a whole Wine prefix / Steam `compatdata` folder)
+from another player, you copied their token too — the server thinks you're the
+same character. **Delete `token.txt` on one machine** and reconnect; a fresh
+token and character are created automatically.
+
+**Frozen in place / over-encumbered right after connecting**
+An older server build could persist corrupted (all-zero) stats. Update both the
+server and `TES4MP.dll`, then open the console (`~`) and run
+`player.setav strength 40` to get moving — your real stats re-upload within 15s.
+
+**Client-side debugging**
+The DLL logs everything to `C:\tes4mp_debug.txt` (in the Wine prefix on Linux).
+Attach it when reporting bugs.

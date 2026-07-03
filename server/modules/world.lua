@@ -76,15 +76,24 @@ local function cellKey(pkt, x, y)
     end
 end
 
+-- nil for NaN/Inf/non-numbers — clients can sample garbage during loading
+-- screens, and cjson refuses to re-encode non-finite values (packet error).
+local function finite(v)
+    local n = tonumber(v)
+    if not n or n ~= n or n == math.huge or n == -math.huge then return nil end
+    return n
+end
+
 function M.handlePositionUpdate(char_id, pkt)
     local json = require("cjson")
     local socket = require("socket")
 
-    local x    = tonumber(pkt.x)   or 0
-    local y    = tonumber(pkt.y)   or 0
-    local z    = tonumber(pkt.z)   or 0
-    local rot  = tonumber(pkt.rot) or 0
-    local anim = tonumber(pkt.anim) or 0
+    local x   = finite(pkt.x)
+    local y   = finite(pkt.y)
+    local z   = finite(pkt.z)
+    local rot = finite(pkt.rot)
+    if not (x and y and z and rot) then return end  -- corrupt sample, drop
+    local anim = math.floor(finite(pkt.anim) or 0)
     local now  = socket.gettime()
     local cell = cellKey(pkt, x, y)
 
