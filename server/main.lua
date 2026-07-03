@@ -146,6 +146,9 @@ local function handlePacket(sock, info, raw)
 
     elseif t == "PLAYER_HIT" then
         world.handlePlayerHit(cid, pkt)
+
+    elseif t == "TP_REQUEST" then
+        world.handleTpRequest(cid)
     end
 end
 

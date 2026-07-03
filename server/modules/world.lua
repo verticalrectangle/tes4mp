@@ -70,9 +70,11 @@ local function cellKey(pkt, x, y)
         return fid ~= 0 and ("%d"):format(fid) or ""
     else
         -- Exterior: bucket into zone grid so adjacent cells share a key.
+        -- %d formatting throughout: cjson yields floats and "E60.0:..." would
+        -- never match the client's "E60:..." key (breaks authority + TP).
         local gx = math.floor(x / EXTERIOR_ZONE)
         local gy = math.floor(y / EXTERIOR_ZONE)
-        return "E" .. ws .. ":" .. gx .. ":" .. gy
+        return ("E%d:%d:%d"):format(math.floor(ws), gx, gy)
     end
 end
 
@@ -114,6 +116,12 @@ function M.handlePositionUpdate(char_id, pkt)
         end
     end
     session.updatePosCache(char_id, x, y, z, now)
+
+    -- Interior cell editor ID (for TP_REQUEST teleports); sent when it changes
+    if pkt.ced ~= nil then
+        local sess0 = session.getByCharId(char_id)
+        if sess0 then sess0.cell_ed = tostring(pkt.ced) end
+    end
 
     -- Cell transition
     local sess = session.getByCharId(char_id)
@@ -573,6 +581,47 @@ function M.handleNpcDamage(char_id, pkt)
     if not auth or auth == char_id then return end
     session.sendTo(auth, json.encode({
         type = "NPC_DAMAGE", cell = cell, ref_id = ref, amount = amount }))
+end
+
+-- ── Teleport to a fellow player (F9) ─────────────────────────────────────────
+
+function M.handleTpRequest(char_id)
+    local json = require("cjson")
+    local me = session.getByCharId(char_id)
+    if not me then return end
+
+    -- Pick another online player we can actually teleport to: an exterior
+    -- zone, or an interior with a known cell editor ID.
+    local target = nil
+    for cid, sess in pairs(session.getAll()) do
+        if cid ~= char_id and sess.cell and sess.cell ~= "" then
+            local teleportable = sess.cell:sub(1, 1) == "E"
+                or (sess.cell_ed and sess.cell_ed ~= "")
+            if teleportable then target = sess; break end
+            target = target or sess  -- fallback (yields the "not yet" message)
+        end
+    end
+    if not target then
+        session.sendTo(char_id, json.encode({
+            type = "MESSAGE", text = "No other player to teleport to." }))
+        return
+    end
+
+    if target.cell:sub(1, 1) == "E" then
+        -- Exterior zone key: E<worldspaceFormId>:<gx>:<gy> (zone = 3 cells)
+        local ws, gx, gy = target.cell:match("^E(%d+):(%-?%d+):(%-?%d+)$")
+        if ws then
+            session.sendTo(char_id, json.encode({
+                type = "TELEPORT", cow = 1, ws = tonumber(ws),
+                cx = tonumber(gx) * 3 + 1, cy = tonumber(gy) * 3 + 1 }))
+        end
+    elseif target.cell_ed and target.cell_ed ~= "" then
+        session.sendTo(char_id, json.encode({
+            type = "TELEPORT", cell = target.cell_ed }))
+    else
+        session.sendTo(char_id, json.encode({
+            type = "MESSAGE", text = target.name .. "'s location isn't teleportable yet." }))
+    end
 end
 
 -- ── PvP hits ──────────────────────────────────────────────────────────────────

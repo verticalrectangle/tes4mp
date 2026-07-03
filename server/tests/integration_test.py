@@ -553,6 +553,36 @@ def test_duplicate_token_rejected():
     a.close()
 
 
+def test_tp_request():
+    """TP_REQUEST → TELEPORT to the other player's interior (by editor ID) or
+    exterior zone (cow coords)."""
+    a = Client.connect_and_auth(fresh_token(), "TpSeeker")
+    b = Client.connect_and_auth(fresh_token(), "TpTarget")
+
+    # Interior: B reports a cell editor ID
+    b.send({"type": "POSITION_UPDATE", "x": 0, "y": 0, "z": 0, "rot": 0,
+            "cell": 131001, "ws": 0, "anim": 0, "hp": 100, "ced": "TestSewer01"})
+    time.sleep(0.1)
+    a.recv_all(0.1)
+
+    a.send({"type": "TP_REQUEST"})
+    pkt = a.expect("TELEPORT")
+    assert pkt.get("cell") == "TestSewer01", f"wrong interior target: {pkt}"
+
+    # Exterior: B moves to Tamriel zone (2, -1) → cow cell coords (7, -2)
+    b.send({"type": "POSITION_UPDATE", "x": 2 * 12288 + 10, "y": -12288 + 10, "z": 0,
+            "rot": 0, "cell": 0, "ws": 60, "anim": 0, "hp": 100, "ft": 1, "cn": "Tamriel"})
+    time.sleep(0.1)
+    a.recv_all(0.1)
+
+    a.send({"type": "TP_REQUEST"})
+    pkt = a.expect("TELEPORT")
+    assert pkt.get("cow") == 1 and pkt.get("ws") == 60, f"wrong exterior target: {pkt}"
+    assert pkt.get("cx") == 7 and pkt.get("cy") == -2, f"wrong coords: {pkt}"
+
+    a.close(); b.close()
+
+
 def test_speed_hack_rejection():
     """POSITION_UPDATE with impossible speed → peer does NOT get PLAYER_POS."""
     a = Client.connect_and_auth(fresh_token(), "Speedhacker")
@@ -935,6 +965,7 @@ def main():
             ("char_save: level clamp",     test_char_save_level_clamp),
             ("char_save: zero stats gate", test_zero_stats_rejected),
             ("position: NaN dropped",      test_nan_position_dropped),
+            ("teleport: TP_REQUEST",       test_tp_request),
             ("auth: duplicate token",      test_duplicate_token_rejected),
             ("auth: taken-name rename",    test_rename_to_taken_name),
             ("auth: start cell persists",  test_start_cell_until_tutorial_done),

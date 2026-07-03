@@ -30,7 +30,7 @@ static void DBG(const std::string& msg) {
     static std::mutex dbgMtx;
     std::lock_guard<std::mutex> lk(dbgMtx);
     std::ofstream f("C:\\tes4mp_debug.txt", std::ios::app);
-    f << msg << "\n";
+    f << "[" << (GetTickCount() / 1000) << "s] " << msg << "\n";
 }
 
 // ── Game-thread command queue ──────────────────────────────────────────────────
@@ -276,12 +276,26 @@ static void TickPendingCoc() {
         target = g_pendingCoc;
         g_pendingCoc.clear();
     }
+    // "cow ..." (exterior worldspace teleport) passes through unchecked
+    if (target.rfind("cow ", 0) == 0) {
+        EnqueueCmd(target);
+        return;
+    }
     std::string cur = CurrentCellEditorId();
     if (!cur.empty() && _stricmp(cur.c_str(), target.c_str()) == 0) {
         DBG("TickPendingCoc: already in " + target + ", skipping coc");
         return;
     }
     EnqueueCmd("coc \"" + target + "\"");
+}
+
+// Cached cell editor ID, sampled on the safe tick — read by pos_sync's thread.
+static std::mutex  g_cellEdMtx;
+static std::string g_cellEdCached;
+
+std::string GameHooks_GetCellEditorId() {
+    std::lock_guard<std::mutex> lk(g_cellEdMtx);
+    return g_cellEdCached;
 }
 
 bool GameHooks_IsSafeToScan() {
@@ -701,8 +715,21 @@ static void PollLoop() {
                 break;
             }
             case PacketType::Teleport:
-                if (!pkt.strField.empty())
-                    EnqueueCmd("coc \"" + pkt.strField + "\"");
+                if ((int)JF(pkt.raw, "cow") == 1) {
+                    // Exterior target: cow <worldspace> <cellX> <cellY>
+                    int ws = (int)JF(pkt.raw, "ws");
+                    int cx = (int)JF(pkt.raw, "cx");
+                    int cy = (int)JF(pkt.raw, "cy");
+                    if (ws == 60) {  // Tamriel (0x3C) — the only mapped worldspace
+                        std::ostringstream ss;
+                        ss << "cow Tamriel " << cx << " " << cy;
+                        SetPendingCoc(ss.str());
+                    } else {
+                        EnqueueMsg("[TES4MP] Target is in an unmapped worldspace.");
+                    }
+                } else if (!pkt.strField.empty()) {
+                    SetPendingCoc(SanitiseForCmd(pkt.strField));
+                }
                 break;
             case PacketType::SetLevel: {
                 std::ostringstream ss; ss << "player.setlevel " << pkt.intField;
@@ -985,6 +1012,18 @@ void GameHooks_Tick() {
     g_menuModeCached.store(InWorld() ? GameIsMenuMode() : true);
     g_lastTickMs.store(GetTickCount());
 
+    // Refresh the cached cell editor ID (~1s cadence; pos_sync reads it)
+    if (GameHooks_IsSafeToScan()) {
+        static DWORD lastCellEd = 0;
+        DWORD now = GetTickCount();
+        if (now - lastCellEd >= 1000) {
+            lastCellEd = now;
+            std::string ed = CurrentCellEditorId();
+            std::lock_guard<std::mutex> lk(g_cellEdMtx);
+            g_cellEdCached = std::move(ed);
+        }
+    }
+
     // Drain queued console commands only while the world is live — lines run
     // right after a load fail silently (setstage) or crash (coc). They stay
     // queued and run on the first live tick. Chargen menus are the exception:
@@ -1015,6 +1054,15 @@ void GameHooks_Tick() {
         bool         down        = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
         bool         f10Pressed  = down && !f10Down;
         f10Down = down;
+
+        // F9 = teleport to a fellow player (server picks someone in a cell)
+        static bool f9Down = false;
+        bool f9 = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+        if (f9 && !f9Down && g_phase == AuthPhase::Done && g_network.isConnected()) {
+            g_network.send("{\"type\":\"TP_REQUEST\"}");
+            EnqueueMsg("[TES4MP] Teleporting to a party member...");
+        }
+        f9Down = f9;
 
         if (g_phase == AuthPhase::Idle && !g_network.isConnected()) {
             static DWORD lastAuto  = 0;

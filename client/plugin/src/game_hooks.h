@@ -36,3 +36,9 @@ int GameHooks_GetPlayerHp();
 // menu mode (loading screens count as menus — cell lists mutate during them).
 bool GameHooks_IsSafeToScan();
 
+#ifdef __cplusplus
+#include <string>
+// Current interior cell editor ID (cached on the game tick; "" if none/exterior).
+std::string GameHooks_GetCellEditorId();
+#endif
+

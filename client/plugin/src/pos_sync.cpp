@@ -3,6 +3,7 @@
 #include "network.h"
 #include "game_hooks.h"
 #include <windows.h>
+#include <string>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -158,6 +159,13 @@ static void PollThread() {
                 bool rateOk = (nowMs - lastMs) >= SEND_MIN_INTERVAL_MS;
                 if ((rateOk && (dist > POS_DEAD_BAND || dr > ROT_DEAD_BAND))
                         || cellChanged || anim != lastAnim) {
+                    // Interior cell editor ID — lets the server teleport others
+                    // to us (TP_REQUEST). Sent only when it changes.
+                    static std::string lastCed;
+                    std::string ced = GameHooks_GetCellEditorId();
+                    bool sendCed = (ced != lastCed);
+                    if (sendCed) lastCed = ced;
+
                     char buf[280];
                     if (isFastTravel && cellName[0]) {
                         snprintf(buf, sizeof(buf),
@@ -177,7 +185,12 @@ static void PollThread() {
                             now.cellFormID, now.worldspaceFormID, anim,
                             GameHooks_GetPlayerHp());
                     }
-                    g_network.send(buf);
+                    std::string pkt = buf;
+                    if (sendCed) {
+                        pkt.pop_back();  // strip closing brace
+                        pkt += ",\"ced\":\"" + ced + "\"}";
+                    }
+                    g_network.send(pkt);
                     last     = now;
                     lastMs   = nowMs;
                     lastAnim = anim;
