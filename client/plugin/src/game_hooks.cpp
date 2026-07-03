@@ -229,6 +229,52 @@ static bool GameIsMenuMode() {
 static std::atomic<bool>  g_menuModeCached{true};
 static std::atomic<DWORD> g_lastTickMs{0};
 
+// Current interior cell's editor ID via ExtraEditorID (empty if none).
+// Cell ExtraDataList sits at cell+0x028; BaseExtraList::m_data at +0x004.
+static std::string CurrentCellEditorId() {
+    void* player = *(void**)0x00B333C4;
+    if (!player) return {};
+    void* cell = *(void**)((char*)player + 0x040);
+    if (!cell) return {};
+    void* ed = *(void**)((char*)cell + 0x02C);
+    while (ed) {
+        uint8_t t = ((uint8_t(__fastcall*)(void*))(*(void***)ed)[1])(ed);
+        if (t == 0x0A) {  // kExtraData_EditorID
+            const char* s = *(const char**)((char*)ed + 0x008);
+            return s ? std::string(s) : std::string{};
+        }
+        ed = *(void**)((char*)ed + 0x004);
+    }
+    return {};
+}
+
+// Join teleport, executed from the tick once the world is live. coc into the
+// cell the player is already standing in unloads it mid-frame and crashes —
+// the editor-ID check skips that case.
+static std::mutex  g_cocMtx;
+static std::string g_pendingCoc;
+
+static void SetPendingCoc(const std::string& cellId) {
+    std::lock_guard<std::mutex> lk(g_cocMtx);
+    g_pendingCoc = cellId;
+}
+
+static void TickPendingCoc() {
+    std::string target;
+    {
+        std::lock_guard<std::mutex> lk(g_cocMtx);
+        if (g_pendingCoc.empty()) return;
+        target = g_pendingCoc;
+        g_pendingCoc.clear();
+    }
+    std::string cur = CurrentCellEditorId();
+    if (!cur.empty() && _stricmp(cur.c_str(), target.c_str()) == 0) {
+        DBG("TickPendingCoc: already in " + target + ", skipping coc");
+        return;
+    }
+    EnqueueCmd("coc \"" + target + "\"");
+}
+
 bool GameHooks_IsSafeToScan() {
     if (!InWorld()) return false;
     // If the game tick hasn't run recently the game is loading (WM_TIMER
@@ -430,6 +476,11 @@ static void ChargenCancel() {
     g_chargen.step = ChargenState::Inactive;
 }
 
+static bool ChargenActive() {
+    std::lock_guard<std::mutex> lk(g_chargenMtx);
+    return g_chargen.step != ChargenState::Inactive;
+}
+
 static void TickChargen() {  // game thread only (IsMenuMode + console cmds)
     std::lock_guard<std::mutex> lk(g_chargenMtx);
     ChargenState& c = g_chargen;
@@ -550,7 +601,7 @@ static void ApplyCharLoad(const std::string& raw) {
 
         std::string cell = json::getStr(raw, "cell");
         if (!cell.empty())
-            EnqueueCmd("coc \"" + SanitiseForCmd(cell) + "\"");
+            SetPendingCoc(SanitiseForCmd(cell));  // deferred + same-cell-safe
     } else {
         // New character — server tells us where to start.
         int gold = json::getInt(raw, "gold");
@@ -925,8 +976,12 @@ void GameHooks_Tick() {
     g_menuModeCached.store(InWorld() ? GameIsMenuMode() : true);
     g_lastTickMs.store(GetTickCount());
 
-    // Drain queued console commands (game thread only)
-    {
+    // Drain queued console commands only while the world is live — lines run
+    // right after a load fail silently (setstage) or crash (coc). They stay
+    // queued and run on the first live tick. Chargen menus are the exception:
+    // its Show*Menu chain must run while its own menus hold menu-mode.
+    if (GameHooks_IsSafeToScan() || ChargenActive()) {
+        TickPendingCoc();
         std::lock_guard<std::mutex> lk(g_cmdMutex);
         while (!g_cmdQueue.empty()) {
             std::string cmd = g_cmdQueue.front();
