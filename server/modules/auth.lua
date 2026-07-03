@@ -26,6 +26,9 @@ function M.handleHello(sock, info, pkt, config)
         send(sock, { type = "KICK", reason = "bad token" })
         return
     end
+    -- Token prefix in the log: distinguishes "two machines" from "copied install"
+    print(("[auth] HELLO from %s token=%s... name=%s")
+        :format(info.addr or "?", token:sub(1, 6), tostring(pkt.name or "")))
 
     local char = store.getCharByToken(token)
     if char and session.getByCharId(tonumber(char.id)) then
