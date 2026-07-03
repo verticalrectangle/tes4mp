@@ -308,6 +308,15 @@ static bool ReadAndSendCharSave() {
     for (int i = 0; i < 21; ++i) curSkills[i] = (int)getAV(player, nullptr, 0x0C + i);
     for (int i = 0; i < 8;  ++i) curAttrs[i]  = (int)getAV(player, nullptr, i);
 
+    // Loading screens / mid-chargen can report every AV as 0. Persisting that
+    // bricks the character (Strength 0 = zero carry weight = can't move on the
+    // next CHAR_LOAD). Skip the checkpoint entirely — a later tick sends real data.
+    {
+        int attrSum = 0;
+        for (int i = 0; i < 8; ++i) attrSum += curAttrs[i];
+        if (attrSum == 0) return false;
+    }
+
     bool skillsDirty = !g_lastSent.valid;
     if (!skillsDirty)
         for (int i = 0; i < 21 && !skillsDirty; ++i)
@@ -491,7 +500,9 @@ static void ApplyActorValues(const std::string& raw, const std::string& key) {
         while (ns < block.size() && block[ns] == ' ') ns++;
         size_t ne = ns;
         while (ne < block.size() && (std::isdigit(block[ne]) || block[ne] == '-' || block[ne] == '.')) ne++;
-        if (ne > ns)
+        // Never restore a value <= 0 — legit saves don't contain them, and a
+        // corrupted checkpoint (e.g. Strength 0) would freeze the player.
+        if (ne > ns && strtol(block.c_str() + ns, nullptr, 10) > 0)
             EnqueueCmd("player.setav " + name + " " + block.substr(ns, ne - ns));
         i = ne + 1;
     }

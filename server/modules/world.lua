@@ -233,6 +233,17 @@ local MAX_SKILL_DELTA = 5   -- max skill gain per 60s checkpoint
 local MAX_ATTR_DELTA  = 6   -- max attribute gain per checkpoint (level-up gives ≤5 to one attr)
 local MAX_LEVEL_DELTA = 1   -- can only level up once per 60s
 
+-- A stat table where every value is 0 is a client sampling glitch (loading
+-- screen / chargen), never a real character. Persisting it bricks the char.
+local function allZero(t)
+    local any = false
+    for _, v in pairs(t) do
+        any = true
+        if (tonumber(v) or 0) ~= 0 then return false end
+    end
+    return any
+end
+
 function M.handleCharSave(char_id, pkt)
     local sess = session.getByCharId(char_id)
     if not sess then return end
@@ -259,6 +270,12 @@ function M.handleCharSave(char_id, pkt)
                 ("level %d→%d in 15s"):format(oldLevel, newLevel))
             newLevel = oldLevel + MAX_LEVEL_DELTA
         end
+    end
+
+    if type(pkt.skills)     == "table" and allZero(pkt.skills)     then pkt.skills     = nil end
+    if type(pkt.attributes) == "table" and allZero(pkt.attributes) then
+        store.logAudit(char_id, "ZERO_STATS_DROPPED", "all-zero attribute checkpoint ignored")
+        pkt.attributes = nil
     end
 
     local newSkills = nil

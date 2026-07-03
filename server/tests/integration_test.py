@@ -448,6 +448,38 @@ def test_char_save_level_clamp():
     b.close()
 
 
+def test_zero_stats_rejected():
+    """All-zero attribute checkpoint (loading-screen glitch) must not persist —
+    Strength 0 = zero carry weight = a bricked, immobile character."""
+    token = fresh_token()
+    a = Client.connect_and_auth(token, "ZeroStats")
+    a.send({"type": "CHAR_SAVE", "name": "ZeroStats", "level": 1,
+            "skills": {"Blade": 30},
+            "attributes": {"Strength": 40, "Endurance": 35},
+            "health": 100, "magicka": 100, "stamina": 100,
+            "pos_x": 0, "pos_y": 0, "pos_z": 0})
+    time.sleep(0.15)
+
+    # Glitched checkpoint: everything zero
+    a.send({"type": "CHAR_SAVE", "name": "ZeroStats", "level": 1,
+            "skills": {"Blade": 0},
+            "attributes": {"Strength": 0, "Endurance": 0},
+            "health": 0, "magicka": 0, "stamina": 0,
+            "pos_x": 0, "pos_y": 0, "pos_z": 0})
+    time.sleep(0.15)
+    a.close()
+
+    time.sleep(0.1)
+    b = Client()
+    b.send({"type": "HELLO", "token": token, "name": "ZeroStats"})
+    pkt = b.expect("CHAR_LOAD")
+    assert pkt.get("attributes", {}).get("Strength") == 40, \
+        f"zero attrs persisted: {pkt.get('attributes')}"
+    assert pkt.get("skills", {}).get("Blade") == 30, \
+        f"zero skills persisted: {pkt.get('skills')}"
+    b.close()
+
+
 def test_speed_hack_rejection():
     """POSITION_UPDATE with impossible speed → peer does NOT get PLAYER_POS."""
     a = Client.connect_and_auth(fresh_token(), "Speedhacker")
@@ -828,6 +860,7 @@ def main():
             ("container: state on join",   test_container_state_on_join),
             ("char_save: skill clamp",     test_char_save_skill_clamp),
             ("char_save: level clamp",     test_char_save_level_clamp),
+            ("char_save: zero stats gate", test_zero_stats_rejected),
             ("speed hack: rejection",      test_speed_hack_rejection),
             ("dungeon: clear broadcast",   test_dungeon_clear),
             ("weather: sync broadcast",    test_weather_sync),
