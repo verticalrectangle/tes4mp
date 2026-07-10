@@ -1,6 +1,8 @@
 # TES4MP Sync Expansion Plan
 
 Status: **in progress** (this document is the coordination point — update it as work lands).
+Next round (WP11–WP15: full quest/NPC/mob/fight/loot sync) is planned in
+**docs/FULL_SYNC_PLAN.md** — WP10 puppet mirroring executes as WP13 there.
 Goal of this round: make co-op *feel* real — players see each other properly geared and
 moving smoothly, share NPC fights, and can optionally hurt each other — while keeping the
 core purpose intact: **playing through quests together** (quest sync is already

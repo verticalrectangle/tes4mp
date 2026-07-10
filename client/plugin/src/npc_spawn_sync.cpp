@@ -1,6 +1,7 @@
 #include "npc_spawn_sync.h"
 #include "oblivion_internal.h"
 #include "game_hooks.h"
+#include "ghost_system.h"
 #include "network.h"
 #include <windows.h>
 #include <cmath>
@@ -32,6 +33,10 @@ static void WalkRefs(void* cell, Fn cb) {
 
 static bool IsDynamicActor(void* ref, uint32_t refId) {
     if ((refId & 0xFF000000) != 0xFF000000) return false;  // dynamic refs only
+    // Player ghosts are ALSO PlaceAtMe dynamic NPC refs — never treat them as
+    // mobs (suppressing one would disable a fellow player's ghost; an authority
+    // would broadcast them as spawns and followers would replicate them).
+    if (GhostSystem_IsGhostRef(refId)) return false;
     void* base = *(void**)((char*)ref + Oblivion::kRef_baseForm);
     if (!base) return false;
     uint8_t t = *(uint8_t*)((char*)base + Oblivion::kForm_typeID);
@@ -106,6 +111,10 @@ static void AuthorityBroadcast(void* cell, const std::string& cellKey) {
     WalkRefs(cell, [&](void* ref, uint32_t refId) {
         if (n >= 24) return false;
         if (!IsDynamicActor(ref, refId)) return true;
+        // Handover: an ex-follower promoted to authority still has its own
+        // suppressed (disabled) local rolls in the cell list — never broadcast
+        // those as live spawns.
+        if (g_suppressed.count(refId)) return true;
         int hp = (int)ActorHp(ref);
         if (hp <= 0) return true;                 // dead ones age out of snapshots
         uint32_t base = BaseId(ref);
@@ -282,6 +291,10 @@ static void FollowerTick(void* cell, const std::string& cellKey) {
         WalkRefs(cell, [&](void* ref, uint32_t refId) {
             if (!IsDynamicActor(ref, refId)) return true;
             if (g_replicaIds.count(refId) || g_suppressed.count(refId)) return true;
+            // Leave corpses alone (dead replicas whose sid left the snapshot,
+            // and anything killed before we joined) — vanishing bodies look
+            // worse than duplicate ones lying around.
+            if (ActorHp(ref) <= 0.f) return true;
             GameHooks_EnqueueCmdOnRef(ref, "disable");
             g_suppressed.insert(refId);
             return true;
