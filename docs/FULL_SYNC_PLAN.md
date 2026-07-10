@@ -1,6 +1,12 @@
 # Full Sync Plan — quests, NPCs, mobs, fights, loot
 
-Status: **draft — awaiting answers to open questions at the bottom, then execution.**
+Status: **implemented (all WPs landed; integration suite 40/40 green). Needs playtest — see checklist at the bottom.**
+
+Decisions made (2026-07-10): loot fully shared-world subtractive; puppet
+streaming = moving/combat actors, nearest 8, 3Hz; unlisted quests default
+GLOBAL (guild lines stay party-scoped via personal_prefixes); WP9 was
+code-audited (not playtested) before building on it — the audit found and
+fixed a critical bug: spawn mirroring treated player ghosts as dynamic mobs.
 Companion to docs/PLAN.md (which stays the coordination doc; WP numbering continues).
 
 Goal of this round: close the remaining gaps between "we see each other move"
@@ -568,16 +574,37 @@ Integration tests (each lands with its WP):
   both).
 - FaceGen replication (unchanged from PLAN.md).
 
-## Open questions (answer before execution)
+## Implementation deltas from the plan
 
-- **Q1 — WP9 playtest first?** WP11/13 build on untested WP9 spawn code.
-  Options: (a) playtest WP9 before starting, (b) build WP11 now and playtest
-  both together, (c) start with WP12 loot (independent of WP9) while waiting.
-- **Q2 — Loot exclusivity confirmed?** Shared-world subtractive ("you took it,
-  I lose it") for corpses and world items — or should world items stay
-  per-player (only containers shared)?
-- **Q3 — Puppet scope:** stream only actors in combat/moving (plan above), or
-  everything that moves including town schedule-walkers (more alive, ~2× the
-  packets, more puppet churn)?
-- **Q4 — Quest scope default:** unlisted quests default to party-scoped
-  (plan above) or global? And keep MQ*/guild rules as-is?
+- WP14 default scope is **global** (user decision), not party — guild lines
+  stay party-scoped via the existing `personal_prefixes`; `ignored_prefixes`
+  denylist and a 40/10s burst guard added; quest editor IDs are charset-
+  validated server-side (they're echoed into peers' setstage commands).
+- Client caps QUEST_STAGE sends at 8/poll so a mid-game character's first
+  baseline upload spreads over polls instead of tripping the burst guard.
+- NPC_POS `ref` for sids is parsed with strtoul (new `JU()` helper) — JF()
+  goes through float and corrupts ids above 2^24.
+- World-item scan re-baselines on ENGINE cell change, not zone key change —
+  exterior sub-cell crossings inside one 3×3 zone must not mass-report.
+- Puppets live in npc_puppet.cpp with one mutex across net/tick/frame; ref
+  resolution + setrestrained happen on the game tick (no engine calls in the
+  Present hook), raw pose writes per frame.
+- WP9 audit fixes (landed first): ghost refs excluded from dynamic-actor
+  classification; ex-follower authorities skip their suppressed rolls in
+  snapshots; suppression leaves corpses alone.
+
+## PLAYTEST checklist (all new offset paths are compile-verified only)
+
+1. WP9+11: two clients in a dungeon — same mobs visible; follower solo-kills
+   a replica → dies for the authority ≤2s. Check tes4mp_debug.txt for which
+   spawn strategy fired.
+2. WP12a: loot a bandit corpse on A → items gone on B; re-enter cell later.
+3. WP12b: take a table item on A → vanishes on B ≤1s; late joiner never sees
+   it. Watch for false positives around cell borders and quest-scripted
+   item removals.
+4. WP13: A authority + B follower watch a patrolling guard: same path on both
+   screens, smooth (~ghost quality); B can hit the puppet; kill → corpse in
+   the same spot. Authority leaves → B's actors resume local AI ≤3s.
+5. WP14: pick up any unlisted side quest on A → B gets the stage (global);
+   FG line stays party-only; watch the server log for QUEST_SPAM audits and
+   noisy controller quests → add prefixes to ignored_prefixes.
