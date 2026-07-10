@@ -889,6 +889,35 @@ def test_corpse_loot_and_dynamic_reject():
     a.close(); b.close(); c.close()
 
 
+def test_world_item_taken():
+    """WORLD_ITEM_TAKEN broadcasts WORLD_ITEM_SYNC to cell peers, persists for
+    late joiners, and rejects dynamic refs."""
+    a = Client.connect_and_auth(fresh_token(), "ItemTaker")
+    b = Client.connect_and_auth(fresh_token(), "ItemWitness")
+
+    cell_key = "141004"
+    put_in_cell(a, 0, 0, 0, cell=int(cell_key))
+    put_in_cell(b, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    a.recv_all(0.2); b.recv_all(0.2)
+
+    a.send({"type": "WORLD_ITEM_TAKEN", "ref_id": 82001, "cell": cell_key})
+    pkt = b.expect("WORLD_ITEM_SYNC")
+    assert pkt.get("refs") == [82001], f"wrong: {pkt}"
+
+    # Dynamic ref rejected
+    a.send({"type": "WORLD_ITEM_TAKEN", "ref_id": 0xFF002222, "cell": cell_key})
+    b.expect_none("WORLD_ITEM_SYNC", timeout=0.3)
+
+    # Late joiner gets the state on cell entry
+    c = Client.connect_and_auth(fresh_token(), "ItemLate")
+    put_in_cell(c, 0, 0, 0, cell=int(cell_key))
+    pkt = c.expect("WORLD_ITEM_SYNC")
+    assert 82001 in pkt.get("refs", []), f"missing on entry: {pkt}"
+
+    a.close(); b.close(); c.close()
+
+
 def test_npc_damage_sid_routing():
     """Follower NPC_DAMAGE_SID routed to authority only; static sid rejected;
     authority-origin dropped."""
@@ -1087,6 +1116,7 @@ def main():
             ("npc_spawns: relay + filter", test_npc_spawns_relay),
             ("npc_damage_sid: routing",    test_npc_damage_sid_routing),
             ("loot: corpse + dyn reject",  test_corpse_loot_and_dynamic_reject),
+            ("loot: world item taken",     test_world_item_taken),
             ("quests: sync on cell entry", test_quest_sync_on_cell_entry),
             ("pvp: hit routed + clamped",  test_pvp_hit),
             ("pvp: disabled gate",         test_pvp_disabled_gate),

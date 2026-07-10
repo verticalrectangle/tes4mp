@@ -15,6 +15,10 @@ void NpcSync_OnKillSync(const uint32_t* refs, int count);
 // Apply an ITEM_SYNC packet — remove items from a container ref.
 void NpcSync_OnItemSync(uint32_t containerRefId, uint32_t itemFormId, int count);
 
+// Apply a WORLD_ITEM_SYNC packet — disable loose item refs a peer picked up
+// (broadcast) or that were taken before we entered the cell (entry push).
+void NpcSync_OnWorldItemSync(const uint32_t* refs, int count);
+
 // Apply a CONTAINER_STATE packet (cell entry) — remove already-looted items.
 struct ContainerEntry { uint32_t refId; uint32_t formId; int count; };
 void NpcSync_OnContainerState(const ContainerEntry* entries, int count);

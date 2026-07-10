@@ -995,6 +995,13 @@ static void PollLoop() {
                     (int)JF(pkt.raw, "amount"));
                 break;
 
+            case PacketType::WorldItemSync: {
+                auto refs = ParseUintArray(pkt.raw, "refs");
+                if (!refs.empty())
+                    NpcSync_OnWorldItemSync(refs.data(), (int)refs.size());
+                break;
+            }
+
             case PacketType::NpcDamageSid:
                 // We are the authority; sid is OUR local refID for the mob.
                 // Same queued damageav path as static NPC_DAMAGE.

@@ -44,6 +44,14 @@ static std::unordered_map<uint32_t, std::unordered_map<uint32_t, int>> g_contain
 // Follower damage detection: last locally observed hp per NPC ref
 static std::unordered_map<uint32_t, int> g_prevLocalHp;
 
+// World-item pickup tracking (WP12b). Keyed on the ENGINE cell, not the zone
+// key: an exterior zone spans 3×3 cells but the ref walk only covers the
+// player's parentCell, so crossing a cell inside one zone must re-baseline or
+// every item of the old cell would read as "taken".
+static std::unordered_set<uint32_t> g_knownItems;
+static std::unordered_set<uint32_t> g_takenItems;   // reported or peer-applied
+static void*                        g_lastItemCell = nullptr;
+
 // ── Authority state (server-assigned per cell) ────────────────────────────────
 
 static std::mutex   g_authMtx;
@@ -60,7 +68,7 @@ static std::vector<NpcHpEntry>    g_pendingHp;
 // is resolved to a live TESObjectREFR* via LookupFormByID on the game thread
 // and executed with the ref as calling context.
 struct RefOp {
-    enum Kind { Kill, KillSilent, RemoveItem, Damage } kind;
+    enum Kind { Kill, KillSilent, RemoveItem, Damage, DisableItem } kind;
     uint32_t refId;
     uint32_t formId;  // RemoveItem
     int      amount;  // RemoveItem count / Damage amount
@@ -101,6 +109,11 @@ static void ApplyPendingOps() {
             snprintf(buf, sizeof(buf), "damageav health %d", op.amount);
             GameHooks_EnqueueCmdOnRef(ref, buf);
             break;
+        case RefOp::DisableItem:
+            // A peer took this world item — it no longer exists for us either.
+            GameHooks_EnqueueCmdOnRef(ref, "disable");
+            g_takenItems.insert(op.refId);
+            break;
         }
     }
 }
@@ -112,6 +125,9 @@ static void ResetCellState() {
     g_sentHp.clear();
     g_authorityHp.clear();
     g_prevLocalHp.clear();
+    g_knownItems.clear();
+    g_takenItems.clear();   // server re-pushes WORLD_ITEM_SYNC on cell entry
+    g_lastItemCell = nullptr;
     std::lock_guard<std::mutex> lk(g_pendMtx);
     g_pendingHp.clear();
 }
@@ -270,6 +286,55 @@ static void ScanContainerLoots(void* cell, const std::string& cellKey) {
     });
 }
 
+// ── World (loose) item pickup scan (~1s) ──────────────────────────────────────
+// Picking up a placed item removes its ref from the cell walk (or leaves it
+// disabled). Presence-diff against the last scan: known → gone = taken.
+// First scan after an engine-cell change only baselines, so pre-existing
+// absences are never reported — the server's persisted state covers those.
+
+static bool IsLootableItemType(uint8_t t) {
+    using namespace Oblivion;
+    return t == kFormType_Weapon || t == kFormType_Armor  || t == kFormType_Clothing
+        || t == kFormType_Misc   || t == kFormType_Ingredient
+        || t == kFormType_Book   || t == kFormType_AlchemyItem
+        || t == kFormType_SoulGem|| t == kFormType_Key    || t == kFormType_Ammo
+        || t == kFormType_Apparatus;
+}
+
+static void ScanWorldItems(void* cell, const std::string& cellKey) {
+    if (cell != g_lastItemCell) {
+        // Engine cell changed under the same zone key (exterior sub-cell
+        // crossing) — re-baseline or every old-cell item reads as taken.
+        g_lastItemCell = cell;
+        g_knownItems.clear();
+    }
+
+    std::unordered_set<uint32_t> present;
+    WalkCellRefs(cell, [&](void* ref, uint32_t refId) {
+        if (refId == 0 || (refId & 0xFF000000) != 0) return true;  // static only
+        void* base = *(void**)((char*)ref + Oblivion::kRef_baseForm);
+        if (!base) return true;
+        if (!IsLootableItemType(*(uint8_t*)((char*)base + Oblivion::kForm_typeID)))
+            return true;
+        uint32_t flags = *(uint32_t*)((char*)ref + Oblivion::kRef_flags);
+        if (flags & Oblivion::kFlag_Disabled) return true;  // peer-sync applied / engine-off
+        present.insert(refId);
+        return true;
+    });
+
+    for (uint32_t refId : g_knownItems) {
+        if (!present.count(refId) && !g_takenItems.count(refId)) {
+            g_takenItems.insert(refId);
+            char buf[96];
+            snprintf(buf, sizeof(buf),
+                "{\"type\":\"WORLD_ITEM_TAKEN\",\"ref_id\":%u,\"cell\":\"%s\"}",
+                refId, cellKey.c_str());
+            g_network.send(buf);
+        }
+    }
+    g_knownItems = std::move(present);
+}
+
 // ── NPC HP authority scan (~1s, authority only) ───────────────────────────────
 
 static bool IsActorRef(void* ref, uint32_t refId) {
@@ -392,6 +457,7 @@ void NpcSync_Tick(const std::string& cellKey) {
     if (now - g_lastNpcMs >= 1000) {
         g_lastNpcMs = now;
         ScanNpcKills(cell, cellKey, isAuthority);
+        ScanWorldItems(cell, cellKey);
         if (isAuthority) ScanNpcHpAsAuthority(cell, cellKey);
     }
 
@@ -418,6 +484,11 @@ void NpcSync_OnKillSync(const uint32_t* refs, int count) {
 
 void NpcSync_OnItemSync(uint32_t containerRefId, uint32_t itemFormId, int count) {
     QueueRefOp({ RefOp::RemoveItem, containerRefId, itemFormId, count });
+}
+
+void NpcSync_OnWorldItemSync(const uint32_t* refs, int count) {
+    for (int i = 0; i < count; ++i)
+        QueueRefOp({ RefOp::DisableItem, refs[i], 0, 0 });
 }
 
 void NpcSync_OnContainerState(const ContainerEntry* entries, int count) {

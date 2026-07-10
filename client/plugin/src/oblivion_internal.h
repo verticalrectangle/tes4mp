@@ -49,6 +49,19 @@ static constexpr uint8_t kFormType_Container = 0x17; // CONT
 static constexpr uint8_t kFormType_NPC       = 0x23; // NPC_
 static constexpr uint8_t kFormType_Creature  = 0x24; // CREA
 
+// Lootable world-item form types (GameForms.h enum order)
+static constexpr uint8_t kFormType_Apparatus   = 0x13; // APPA
+static constexpr uint8_t kFormType_Armor       = 0x14; // ARMO
+static constexpr uint8_t kFormType_Book        = 0x15; // BOOK
+static constexpr uint8_t kFormType_Clothing    = 0x16; // CLOT
+static constexpr uint8_t kFormType_Ingredient  = 0x19; // INGR
+static constexpr uint8_t kFormType_Misc        = 0x1B; // MISC (incl. gold)
+static constexpr uint8_t kFormType_Weapon      = 0x21; // WEAP
+static constexpr uint8_t kFormType_Ammo        = 0x22; // AMMO
+static constexpr uint8_t kFormType_SoulGem     = 0x26; // SLGM
+static constexpr uint8_t kFormType_Key         = 0x27; // KEYM
+static constexpr uint8_t kFormType_AlchemyItem = 0x28; // ALCH
+
 // ── ExtraData type codes (GameBSExtraData.h) ──────────────────────────────────
 static constexpr uint8_t kExtraData_ContainerChanges = 0x1A; // 26 — present when container modified
 

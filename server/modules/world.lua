@@ -192,6 +192,12 @@ function M.handlePositionUpdate(char_id, pkt)
                 session.sendTo(char_id, json.encode({ type = "CONTAINER_STATE", containers = containers }))
             end
 
+            -- Send taken world items for the new cell
+            local takenItems = store.getWorldItemsTaken(cell)
+            if #takenItems > 0 then
+                session.sendTo(char_id, json.encode({ type = "WORLD_ITEM_SYNC", refs = takenItems }))
+            end
+
             -- Stage parity: world content is enabled/disabled by quest stage,
             -- so drifted stages make spawns invisible to one player. Re-sync
             -- on every cell entry, not just login.
@@ -514,6 +520,23 @@ function M.handleItemTaken(char_id, pkt)
         item_form_id     = iform,
         count            = count,
     }), char_id)
+end
+
+-- ── World (loose) item pickup sync ────────────────────────────────────────────
+
+function M.handleWorldItemTaken(char_id, pkt)
+    local json   = require("cjson")
+    local ref_id = tonumber(pkt.ref_id) or 0
+    local cell   = tostring(pkt.cell or "")
+    -- Static refs only — dynamic ids mean nothing on other clients
+    if ref_id == 0 or cell == "" or ref_id >= 0xFF000000 then return end
+
+    local sess = session.getByCharId(char_id)
+    if not sess or sess.cell ~= cell then return end
+
+    store.setWorldItemTaken(ref_id, cell, char_id)
+    session.broadcastToCell(cell,
+        json.encode({ type = "WORLD_ITEM_SYNC", refs = { ref_id } }), char_id)
 end
 
 -- ── Equipment sync ────────────────────────────────────────────────────────────

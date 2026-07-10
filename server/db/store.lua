@@ -159,6 +159,13 @@ local TABLES = {
     cell_key         TEXT    NOT NULL,
     PRIMARY KEY (container_ref_id, item_form_id)
 )]],
+[[CREATE TABLE IF NOT EXISTS world_items_taken (
+    ref_id   INTEGER NOT NULL,
+    cell_key TEXT    NOT NULL,
+    taken_by INTEGER NOT NULL,
+    taken_at INTEGER NOT NULL,
+    PRIMARY KEY (ref_id, cell_key)
+)]],
 }
 
 local SKILLS = {
@@ -561,6 +568,26 @@ function M.getKilledRefs(cell_key)
     -- Returns array of ref_id integers still dead in the cell (respawn not due yet).
     local cur = query(("SELECT ref_id FROM killed_refs WHERE cell_key='%s' AND (respawn_at=0 OR respawn_at>%d)")
         :format(esc(cell_key), os.time()))
+    local refs = {}
+    local row = cur:fetch({}, "n")
+    while row and row[1] do
+        refs[#refs + 1] = tonumber(row[1])
+        row = cur:fetch({}, "n")
+    end
+    cur:close()
+    return refs
+end
+
+-- ── World (loose) items ───────────────────────────────────────────────────────
+
+function M.setWorldItemTaken(ref_id, cell_key, char_id)
+    exec(("INSERT OR REPLACE INTO world_items_taken (ref_id,cell_key,taken_by,taken_at) VALUES(%d,'%s',%d,%d)")
+        :format(tonumber(ref_id), esc(cell_key), tonumber(char_id), os.time()))
+end
+
+function M.getWorldItemsTaken(cell_key)
+    local cur = query(("SELECT ref_id FROM world_items_taken WHERE cell_key='%s'")
+        :format(esc(cell_key)))
     local refs = {}
     local row = cur:fetch({}, "n")
     while row and row[1] do
