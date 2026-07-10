@@ -65,6 +65,7 @@ enum class PacketType : int {
     NpcSpawns       = 45,  // authority dynamic spawn snapshot — raw JSON
     NpcDamageSid    = 46,  // follower damage on a replica, routed to us (authority) — sid/amount in raw
     WorldItemSync   = 47,  // loose world items taken — refs array in raw
+    NpcPos          = 48,  // authority NPC position stream — cell + npcs array in raw
 };
 
 struct Packet {

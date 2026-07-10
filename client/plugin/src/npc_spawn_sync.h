@@ -16,3 +16,7 @@ void NpcSpawnSync_OnSnapshot(const SpawnEntry* entries, int count);
 
 // True if refId is one of our replicas — other scanners must ignore it.
 bool NpcSpawnSync_IsReplica(uint32_t refId);
+
+// Our local replica ref for an authority sid (null if not spawned yet).
+// Game thread only.
+void* NpcSpawnSync_GetReplicaRef(uint32_t sid);

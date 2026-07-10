@@ -158,6 +158,9 @@ local function handlePacket(sock, info, raw)
 
     elseif t == "WORLD_ITEM_TAKEN" then
         world.handleWorldItemTaken(cid, pkt)
+
+    elseif t == "NPC_POS" then
+        world.handleNpcPos(cid, pkt)
     end
 end
 

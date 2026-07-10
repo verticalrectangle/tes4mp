@@ -949,6 +949,34 @@ def test_npc_damage_sid_routing():
     a.close(); b.close(); c.close()
 
 
+def test_npc_pos_relay():
+    """Authority NPC_POS relayed to cell peers, capped at 8, non-finite dropped;
+    non-authority stream ignored."""
+    a = Client.connect_and_auth(fresh_token(), "PosAuth")
+    b = Client.connect_and_auth(fresh_token(), "PosPeer")
+
+    cell_key = "141005"
+    put_in_cell(a, 0, 0, 0, cell=int(cell_key))
+    put_in_cell(b, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    a.recv_all(0.2); b.recv_all(0.2)
+
+    npcs = [{"ref": 5000 + i, "x": i * 10.0, "y": 0.0, "z": 0.0, "rot": 1.5}
+            for i in range(10)]                      # 10 sent → 8 relayed
+    npcs[3]["x"] = float("nan")                      # dropped entry
+    a.send({"type": "NPC_POS", "cell": cell_key, "npcs": npcs})
+    pkt = b.expect("NPC_POS")
+    got = pkt.get("npcs", [])
+    refs = [e["ref"] for e in got]
+    assert len(got) == 8 and 5003 not in refs, f"cap/NaN filtering wrong: {refs}"
+
+    b.send({"type": "NPC_POS", "cell": cell_key,
+            "npcs": [{"ref": 1, "x": 0, "y": 0, "z": 0, "rot": 0}]})
+    a.expect_none("NPC_POS", timeout=0.4)
+
+    a.close(); b.close()
+
+
 def test_quest_sync_on_cell_entry():
     """Entering a cell re-sends QUEST_SYNC (stage parity guard)."""
     a = Client.connect_and_auth(fresh_token(), "StageParity")
@@ -1117,6 +1145,7 @@ def main():
             ("npc_damage_sid: routing",    test_npc_damage_sid_routing),
             ("loot: corpse + dyn reject",  test_corpse_loot_and_dynamic_reject),
             ("loot: world item taken",     test_world_item_taken),
+            ("npc_pos: relay + cap",       test_npc_pos_relay),
             ("quests: sync on cell entry", test_quest_sync_on_cell_entry),
             ("pvp: hit routed + clamped",  test_pvp_hit),
             ("pvp: disabled gate",         test_pvp_disabled_gate),

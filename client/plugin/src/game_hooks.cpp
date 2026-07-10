@@ -2,6 +2,7 @@
 #include "ghost_system.h"
 #include "npc_sync.h"
 #include "npc_spawn_sync.h"
+#include "npc_puppet.h"
 #include "equip_sync.h"
 #include "quest_sync.h"
 #include "d3d_hook.h"
@@ -136,6 +137,30 @@ static std::vector<SpawnEntry> ParseSpawnArray(const std::string& s) {
         e.z    = JF(obj, "z");
         e.hp   = (int)JF(obj, "hp");
         if (e.sid && e.base) out.push_back(e);
+        p = objEnd;
+    }
+    return out;
+}
+
+// Parse NPC_POS payload: "npcs":[{"ref":N,"x":..,"y":..,"z":..,"rot":..},...]
+struct NpcPosEntry { uint32_t ref; float x, y, z, rot; };
+static std::vector<NpcPosEntry> ParseNpcPosArray(const std::string& s) {
+    std::vector<NpcPosEntry> out;
+    size_t p = s.find("\"npcs\"");
+    if (p == std::string::npos) return out;
+    while (true) {
+        size_t rp = s.find("\"ref\"", p);
+        if (rp == std::string::npos) break;
+        size_t objEnd = s.find('}', rp);
+        if (objEnd == std::string::npos) break;
+        std::string obj = s.substr(rp, objEnd - rp);
+        NpcPosEntry e{};
+        e.ref = (uint32_t)strtoul(obj.c_str() + 6, nullptr, 10);
+        e.x   = JF(obj, "x");
+        e.y   = JF(obj, "y");
+        e.z   = JF(obj, "z");
+        e.rot = JF(obj, "rot");
+        if (e.ref) out.push_back(e);
         p = objEnd;
     }
     return out;
@@ -710,6 +735,13 @@ static void ApplyCharLoad(const std::string& raw) {
     EnqueueCmd("Message \"[TES4MP] Connected as " + SanitiseForCmd(name) + "\"");
 }
 
+// ── Present-hook frame callback ───────────────────────────────────────────────
+// Ghosts and NPC puppets both update per rendered frame. No engine calls here.
+static void FramePresentTick() {
+    GhostSystem_OnFrame();
+    NpcPuppet_OnFrame();
+}
+
 // ── Background poll loop ───────────────────────────────────────────────────────
 
 static void PollLoop() {
@@ -1002,6 +1034,11 @@ static void PollLoop() {
                 break;
             }
 
+            case PacketType::NpcPos:
+                for (const auto& e : ParseNpcPosArray(pkt.raw))
+                    NpcPuppet_OnPos(e.ref, e.x, e.y, e.z, e.rot);
+                break;
+
             case PacketType::NpcDamageSid:
                 // We are the authority; sid is OUR local refID for the mob.
                 // Same queued damageav path as static NPC_DAMAGE.
@@ -1052,7 +1089,7 @@ static void OnOBSEMessage(OBSEMessagingInterface::Message* msg) {
     if (msg->type == OBSEMessagingInterface::kMessage_PostLoadGame) {
         DBG("PostLoadGame fired");
         // Deferred from GameHooks_Init — D3D device exists by now
-        D3DHook_Init(GhostSystem_OnFrame);
+        D3DHook_Init(FramePresentTick);
         AttemptConnect();
     } else if (msg->type == OBSEMessagingInterface::kMessage_SaveGame &&
                g_phase == AuthPhase::Idle) {
@@ -1124,7 +1161,7 @@ void GameHooks_Tick() {
         static bool d3dInit = false;
         if (!d3dInit) {
             d3dInit = true;
-            D3DHook_Init(GhostSystem_OnFrame);
+            D3DHook_Init(FramePresentTick);
         }
 
         static bool  f10Down     = false;

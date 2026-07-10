@@ -629,6 +629,33 @@ function M.handleNpcSpawns(char_id, pkt)
     }), char_id)
 end
 
+-- WP13: authority streams positions of moving NPCs (~3Hz, ≤8); relay to cell.
+function M.handleNpcPos(char_id, pkt)
+    local json = require("cjson")
+    local cell = tostring(pkt.cell or "")
+    if cell == "" or type(pkt.npcs) ~= "table" then return end
+
+    local sess = session.getByCharId(char_id)
+    if not sess or sess.cell ~= cell then return end
+    if authorities[cell] ~= char_id then return end  -- authority only
+
+    local npcs = {}
+    for _, e in ipairs(pkt.npcs) do
+        if type(e) == "table" then
+            local ref = math.floor(tonumber(e.ref) or 0)
+            local x, y, z, rot = finite(e.x), finite(e.y), finite(e.z), finite(e.rot)
+            if ref > 0 and x and y and z and rot then
+                npcs[#npcs + 1] = { ref = ref, x = x, y = y, z = z, rot = rot }
+            end
+        end
+        if #npcs >= 8 then break end
+    end
+    if #npcs == 0 then return end
+
+    session.broadcastToCell(cell,
+        json.encode({ type = "NPC_POS", cell = cell, npcs = npcs }), char_id)
+end
+
 function M.handleNpcDamage(char_id, pkt)
     local json   = require("cjson")
     local cell   = tostring(pkt.cell or "")

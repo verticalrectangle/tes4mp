@@ -1,5 +1,6 @@
 #include "npc_sync.h"
 #include "npc_spawn_sync.h"
+#include "npc_puppet.h"
 #include "oblivion_internal.h"
 #include "ghost_system.h"
 #include "game_hooks.h"
@@ -9,6 +10,8 @@
 #include <cstring>
 #include <cstdio>
 #include <string>
+#include <algorithm>
+#include <cmath>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -51,6 +54,11 @@ static std::unordered_map<uint32_t, int> g_prevLocalHp;
 static std::unordered_set<uint32_t> g_knownItems;
 static std::unordered_set<uint32_t> g_takenItems;   // reported or peer-applied
 static void*                        g_lastItemCell = nullptr;
+
+// NPC position streaming (WP13, authority only)
+struct StreamPos { float x, y, z, rot; };
+static std::unordered_map<uint32_t, StreamPos> g_lastStreamPos;
+static DWORD g_lastPosStreamMs = 0;
 
 // ── Authority state (server-assigned per cell) ────────────────────────────────
 
@@ -128,6 +136,7 @@ static void ResetCellState() {
     g_knownItems.clear();
     g_takenItems.clear();   // server re-pushes WORLD_ITEM_SYNC on cell entry
     g_lastItemCell = nullptr;
+    g_lastStreamPos.clear();
     std::lock_guard<std::mutex> lk(g_pendMtx);
     g_pendingHp.clear();
 }
@@ -376,6 +385,70 @@ static void ScanNpcHpAsAuthority(void* cell, const std::string& cellKey) {
     g_network.send(pkt);
 }
 
+// ── NPC position streaming (authority, ~3Hz — WP13) ──────────────────────────
+// Stream moving actors (static NPCs/creatures + our dynamic spawns) so
+// followers can puppet them. Moved-only + nearest-8 keeps this ~2KB/s.
+
+static void StreamNpcPosAsAuthority(void* cell, const std::string& cellKey) {
+    using namespace Oblivion;
+    void* player = GetPlayer();
+    if (!player) return;
+    float px = *(float*)((char*)player + kRef_posX);
+    float py = *(float*)((char*)player + kRef_posY);
+
+    struct Cand { uint32_t key; float x, y, z, rot, d2; };
+    std::vector<Cand> cands;
+
+    WalkCellRefs(cell, [&](void* ref, uint32_t refId) {
+        bool isStatic  = IsActorRef(ref, refId) && !g_knownDead.count(refId);
+        bool isDynamic = (refId & 0xFF000000) == 0xFF000000
+                         && !GhostSystem_IsGhostRef(refId);
+        if (isDynamic) {
+            void* base = *(void**)((char*)ref + kRef_baseForm);
+            uint8_t t  = base ? *(uint8_t*)((char*)base + kForm_typeID) : 0;
+            isDynamic  = (t == kFormType_NPC || t == kFormType_Creature);
+        }
+        if (!isStatic && !isDynamic) return true;
+        if (GetActorHp(ref) <= 0.f) return true;
+
+        float x = *(float*)((char*)ref + kRef_posX);
+        float y = *(float*)((char*)ref + kRef_posY);
+        float z = *(float*)((char*)ref + kRef_posZ);
+        float r = *(float*)((char*)ref + kRef_rotZ);
+
+        auto it = g_lastStreamPos.find(refId);
+        bool moved = (it == g_lastStreamPos.end())
+            ? false  // first sight only baselines — idle actors cost nothing
+            : ((x - it->second.x) * (x - it->second.x)
+             + (y - it->second.y) * (y - it->second.y) > 4.f
+             || std::abs(r - it->second.rot) > 0.05f);
+        g_lastStreamPos[refId] = { x, y, z, r };
+        if (!moved) return true;
+
+        float dx = x - px, dy = y - py;
+        cands.push_back({ refId, x, y, z, r, dx * dx + dy * dy });
+        return true;
+    });
+
+    if (cands.empty()) return;
+    std::sort(cands.begin(), cands.end(),
+              [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
+
+    std::string arr;
+    int n = 0;
+    for (const Cand& c : cands) {
+        if (n >= 8) break;
+        char e[128];
+        snprintf(e, sizeof(e),
+            "%s{\"ref\":%u,\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,\"rot\":%.3f}",
+            n ? "," : "", c.key, c.x, c.y, c.z, c.rot);
+        arr += e;
+        ++n;
+    }
+    g_network.send("{\"type\":\"NPC_POS\",\"cell\":\"" + cellKey + "\",\"npcs\":["
+                   + arr + "]}");
+}
+
 // ── NPC HP apply (~game tick, followers) ─────────────────────────────────────
 
 static void ApplyPendingHp(void* cell, const std::string& cellKey) {
@@ -460,6 +533,13 @@ void NpcSync_Tick(const std::string& cellKey) {
         ScanWorldItems(cell, cellKey);
         if (isAuthority) ScanNpcHpAsAuthority(cell, cellKey);
     }
+
+    // WP13: authority streams moving-actor positions; followers manage puppets
+    if (isAuthority && now - g_lastPosStreamMs >= 333) {
+        g_lastPosStreamMs = now;
+        StreamNpcPosAsAuthority(cell, cellKey);
+    }
+    NpcPuppet_Tick(cellKey, isAuthority);
 
     if (!isAuthority) ApplyPendingHp(cell, cellKey);
 

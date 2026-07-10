@@ -91,6 +91,11 @@ bool NpcSpawnSync_IsReplica(uint32_t refId) {
     return g_replicaIds.count(refId) != 0;
 }
 
+void* NpcSpawnSync_GetReplicaRef(uint32_t sid) {
+    auto it = g_replicas.find(sid);
+    return it != g_replicas.end() ? it->second.ref : nullptr;
+}
+
 static void ResetState() {
     g_replicas.clear();
     g_replicaIds.clear();

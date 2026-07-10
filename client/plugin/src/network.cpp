@@ -237,6 +237,8 @@ void Network::dispatchLine(const std::string& line) {
         p.type = PacketType::NpcDamageSid;
     } else if (type == "WORLD_ITEM_SYNC") {
         p.type = PacketType::WorldItemSync;
+    } else if (type == "NPC_POS") {
+        p.type = PacketType::NpcPos;
     } else if (type == "DAMAGE_TAKEN") {
         p.type     = PacketType::DamageTaken;
         p.intField = getInt(line, "amount");

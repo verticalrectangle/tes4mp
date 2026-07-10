@@ -1,5 +1,6 @@
 #include "ghost_system.h"
 #include "game_hooks.h"
+#include "interp.h"
 #include "oblivion_internal.h"
 #include <windows.h>
 #include <string>
@@ -20,8 +21,8 @@ static void GS_DBG(const std::string& s) {
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 
-static constexpr int     SNAP_CAP       = 16;         // ring buffer size per ghost (~1s at 15Hz)
-static constexpr DWORD   INTERP_DELAY   = 150;        // ms behind live for interpolation
+// Snapshot ring + interpolation constants live in interp.h (shared with
+// puppet NPCs). INTERP_DELAY = Interp::DELAY_MS.
 static constexpr DWORD   SPAWN_WAIT_MS  = 500;        // ms after PlaceAtMe before scanning
 static constexpr DWORD   SPAWN_TIMEOUT  = 3000;       // ms — retry PlaceAtMe if scan fails
 static constexpr uint32_t GHOST_BASE_NPC = 0x0001C34F; // preferred: Imperial Watch guard
@@ -90,13 +91,6 @@ static uint32_t ResolveGhostBase() {
 
 static std::set<uint32_t> g_claimedFids;
 
-// ── Snapshot ring buffer ──────────────────────────────────────────────────────
-
-struct Snap {
-    DWORD ms;
-    float x, y, z, rotZ;
-};
-
 // ── Race EditorID lookup (Oblivion.esm — formID low 3 bytes) ─────────────────
 
 static const char* RaceEditorId(uint32_t fid) {
@@ -126,9 +120,7 @@ struct Ghost {
     uint32_t    raceFormId   = 0;
     int         gender       = 0;
 
-    Snap        buf[SNAP_CAP] = {};
-    int         head          = 0;
-    int         count         = 0;
+    Interp::Buffer interp;
 
     int         animGroup   = 0;
     int         appliedAnim = -1;
@@ -175,109 +167,6 @@ static std::mutex      g_evtMtx;
 static void PushEvt(Evt e) {
     std::lock_guard<std::mutex> lk(g_evtMtx);
     g_evtQ.push(std::move(e));
-}
-
-// ── Write ghost ref position (game thread only) ───────────────────────────────
-
-static void WriteRef(void* ref, float x, float y, float z, float rotZ) {
-    using namespace Oblivion;
-    auto* r = static_cast<char*>(ref);
-    *reinterpret_cast<float*>(r + kRef_posX) = x;
-    *reinterpret_cast<float*>(r + kRef_posY) = y;
-    *reinterpret_cast<float*>(r + kRef_posZ) = z;
-    *reinterpret_cast<float*>(r + kRef_rotZ) = rotZ;
-
-    void* ni = *reinterpret_cast<void**>(r + kRef_niNode);
-    if (ni) {
-        auto* n = static_cast<char*>(ni);
-        *reinterpret_cast<float*>(n + kNi_worldTransX) = x;
-        *reinterpret_cast<float*>(n + kNi_worldTransY) = y;
-        *reinterpret_cast<float*>(n + kNi_worldTransZ) = z;
-        *reinterpret_cast<float*>(n + kNi_boundCtrX)   = x;
-        *reinterpret_cast<float*>(n + kNi_boundCtrY)   = y;
-        *reinterpret_cast<float*>(n + kNi_boundCtrZ)   = z;
-    }
-}
-
-// ── Push snapshot ─────────────────────────────────────────────────────────────
-
-static void PushSnap(Ghost& g, float x, float y, float z, float rotZ) {
-    DWORD now = GetTickCount();
-    // Long silence (out of range, lag spike) — snap to the new position
-    // rather than gliding across the whole gap.
-    if (g.count > 0) {
-        int newest = (g.head + SNAP_CAP - 1) % SNAP_CAP;
-        if (now - g.buf[newest].ms > 1500) { g.count = 0; g.head = 0; }
-    }
-    Snap& s = g.buf[g.head];
-    s.ms   = now;
-    s.x = x; s.y = y; s.z = z; s.rotZ = rotZ;
-    g.head = (g.head + 1) % SNAP_CAP;
-    if (g.count < SNAP_CAP) g.count++;
-}
-
-// ── Interpolate position at renderTime ───────────────────────────────────────
-
-static constexpr float kPi = 3.14159265358979f;
-
-// Shortest-arc angle lerp — plain lerp spins the long way across the ±π wrap.
-static float LerpAngle(float a, float b, float t) {
-    float d = b - a;
-    while (d >  kPi) d -= 2.f * kPi;
-    while (d < -kPi) d += 2.f * kPi;
-    return a + t * d;
-}
-
-static constexpr DWORD EXTRAP_MAX_MS = 250;  // extrapolation cap on buffer underrun
-
-static bool InterpPos(const Ghost& g, DWORD renderMs,
-                      float& ox, float& oy, float& oz, float& orot)
-{
-    if (g.count == 0) return false;
-
-    int newest = (g.head + SNAP_CAP - 1) % SNAP_CAP;
-    int oldest = (g.head + SNAP_CAP - g.count) % SNAP_CAP;
-
-    const Snap& sNew = g.buf[newest];
-    if (renderMs >= sNew.ms || g.count == 1) {
-        ox = sNew.x; oy = sNew.y; oz = sNew.z; orot = sNew.rotZ;
-        // Buffer underrun — extrapolate briefly along the last known velocity
-        // to hide network jitter, then hold position.
-        if (g.count >= 2 && renderMs > sNew.ms) {
-            const Snap& sPrev = g.buf[(newest + SNAP_CAP - 1) % SNAP_CAP];
-            DWORD dt = sNew.ms - sPrev.ms;
-            if (dt > 0 && dt < 1000) {
-                DWORD ahead = renderMs - sNew.ms;
-                if (ahead > EXTRAP_MAX_MS) ahead = EXTRAP_MAX_MS;
-                float k = (float)ahead / (float)dt;
-                ox += (sNew.x - sPrev.x) * k;
-                oy += (sNew.y - sPrev.y) * k;
-                oz += (sNew.z - sPrev.z) * k;
-            }
-        }
-        return true;
-    }
-
-    int prevIdx = oldest;
-    for (int i = 1; i < g.count; i++) {
-        int curIdx = (oldest + i) % SNAP_CAP;
-        const Snap& sa = g.buf[prevIdx];
-        const Snap& sb = g.buf[curIdx];
-        if (sa.ms <= renderMs && renderMs <= sb.ms) {
-            float t = (sb.ms == sa.ms) ? 0.f
-                      : (float)(renderMs - sa.ms) / (float)(sb.ms - sa.ms);
-            ox   = sa.x + t * (sb.x - sa.x);
-            oy   = sa.y + t * (sb.y - sa.y);
-            oz   = sa.z + t * (sb.z - sa.z);
-            orot = LerpAngle(sa.rotZ, sb.rotZ, t);
-            return true;
-        }
-        prevIdx = curIdx;
-    }
-
-    const Snap& sOld = g.buf[oldest];
-    ox = sOld.x; oy = sOld.y; oz = sOld.z; orot = sOld.rotZ;
-    return true;
 }
 
 // ── Cell scan: find newest unclaimed ref with given base form ID ──────────────
@@ -357,7 +246,7 @@ static void DrainEvents() {
             gh.raceFormId = ev.raceFormId;
             gh.gender     = ev.gender;
 
-            PushSnap(gh, ev.x, ev.y, ev.z, ev.rotZ);
+            gh.interp.push(GetTickCount(), ev.x, ev.y, ev.z, ev.rotZ);
             gh.animGroup = ev.animGroup;
             gh.phase     = Phase::Spawning;
             gh.placed    = false;
@@ -391,7 +280,7 @@ static void DrainEvents() {
             auto it = g_ghosts.find(ev.charId);
             if (it == g_ghosts.end()) break;
             Ghost& gh = it->second;
-            PushSnap(gh, ev.x, ev.y, ev.z, ev.rotZ);
+            gh.interp.push(GetTickCount(), ev.x, ev.y, ev.z, ev.rotZ);
             gh.animGroup = ev.animGroup;
             if (std::abs(ev.hp - gh.hp) > 5) {
                 gh.hp = ev.hp;
@@ -446,7 +335,7 @@ static void ApplyEquip(Ghost& gh) {
 
 static void TickGhosts() {
     DWORD now      = GetTickCount();
-    DWORD renderMs = (now > INTERP_DELAY) ? now - INTERP_DELAY : 0;
+    DWORD renderMs = (now > Interp::DELAY_MS) ? now - Interp::DELAY_MS : 0;
 
     // Cell object lists mutate during loading screens — never scan or spawn
     // there. Position writes on already-claimed refs are skipped too: the refs
@@ -579,9 +468,9 @@ static void TickGhosts() {
         if (gh.equipDirty) ApplyEquip(gh);
 
         float x, y, z, rotZ;
-        if (!InterpPos(gh, renderMs, x, y, z, rotZ)) continue;
+        if (!gh.interp.sample(renderMs, x, y, z, rotZ)) continue;
 
-        WriteRef(g_slotRefs[gh.slot], x, y, z, rotZ);
+        Interp::WriteRef(g_slotRefs[gh.slot], x, y, z, rotZ);
 
         if (gh.animGroup != gh.appliedAnim) {
             EnqRef(g_slotRefs[gh.slot],
