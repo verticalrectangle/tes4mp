@@ -664,6 +664,35 @@ def test_quest_sync():
     a.close(); b.close()
 
 
+def test_quest_scope_rules():
+    """WP14: unlisted quest IDs default to GLOBAL scope; personal-prefix quests
+    stay party-scoped; malformed and ignored IDs are dropped."""
+    a = Client.connect_and_auth(fresh_token(), "ScopeA")
+    b = Client.connect_and_auth(fresh_token(), "ScopeB")
+    time.sleep(0.1)
+    b.recv_all(0.2)
+
+    # Unlisted quest → global broadcast
+    a.send({"type": "QUEST_STAGE", "questId": "SQ01UnlistedSideQuest", "stage": 20})
+    pkt = b.expect("QUEST_STAGE")
+    assert pkt.get("questId") == "SQ01UnlistedSideQuest" and pkt.get("scope") == "global", \
+        f"unlisted not global: {pkt}"
+
+    # personal_prefixes quest (FG*) → party-scoped; b (no party) gets nothing
+    a.send({"type": "QUEST_STAGE", "questId": "FG01", "stage": 10})
+    b.expect_none("QUEST_STAGE", timeout=0.4)
+
+    # Malformed editor ID (console injection) → dropped
+    a.send({"type": "QUEST_STAGE", "questId": "MQ02 10; player.kill", "stage": 30})
+    b.expect_none("QUEST_STAGE", timeout=0.3)
+
+    # Ignored prefix → dropped
+    a.send({"type": "QUEST_STAGE", "questId": "TestIgnoredQuest", "stage": 5})
+    b.expect_none("QUEST_STAGE", timeout=0.3)
+
+    a.close(); b.close()
+
+
 def test_faction_rank():
     """FACTION_RANK with forward progress → broadcast to all players."""
     a = Client.connect_and_auth(fresh_token(), "FactionA")
@@ -1133,6 +1162,7 @@ def main():
             ("dungeon: clear broadcast",   test_dungeon_clear),
             ("weather: sync broadcast",    test_weather_sync),
             ("quest: stage sync",          test_quest_sync),
+            ("quest: scope rules (WP14)",  test_quest_scope_rules),
             ("faction: rank broadcast",    test_faction_rank),
             ("bounty: report + clear",     test_bounty),
             ("equip: update broadcast",    test_equip_broadcast),

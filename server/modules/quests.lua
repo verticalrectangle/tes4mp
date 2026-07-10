@@ -14,16 +14,40 @@ function M.getMonitored()
     return (questConfig and questConfig.monitored) or {}
 end
 
-local function isGlobal(questId)
-    if not questConfig then return false end
-    for _, qid in ipairs(questConfig.global_quests or {}) do
+local function matches(questId, list, prefixes)
+    for _, qid in ipairs(list or {}) do
         if qid == questId then return true end
     end
-    for _, prefix in ipairs(questConfig.global_prefixes or {}) do
+    for _, prefix in ipairs(prefixes or {}) do
         if questId:sub(1, #prefix) == prefix then return true end
     end
     return false
 end
+
+-- WP14 scope rules (clients report ALL quests now):
+--   ignored_prefixes/ignored_quests  → dropped (engine-noise controller quests)
+--   global_quests/global_prefixes    → global
+--   personal_quests/personal_prefixes→ party-scoped (guild lines)
+--   everything else                  → config "default" ("global" here)
+local function isGlobal(questId)
+    if not questConfig then return false end
+    if matches(questId, questConfig.global_quests, questConfig.global_prefixes) then
+        return true
+    end
+    if matches(questId, questConfig.personal_quests, questConfig.personal_prefixes) then
+        return false
+    end
+    return (questConfig.default or "global") ~= "personal"
+end
+
+local function isIgnored(questId)
+    if not questConfig then return false end
+    return matches(questId, questConfig.ignored_quests, questConfig.ignored_prefixes)
+end
+
+-- Burst guard: a corrupted client-side quest walk could spray hundreds of
+-- QUEST_STAGE packets; the honest client caps itself at 8 per 5s poll.
+local QS_WINDOW_S, QS_MAX = 10, 40
 
 function M.handleQuestStage(char_id, questId, stage)
     local json    = require("cjson")
@@ -32,6 +56,25 @@ function M.handleQuestStage(char_id, questId, stage)
 
     stage = tonumber(stage)
     if not stage then return end
+
+    -- Editor IDs are alnum/underscore/dash; anything else is not a quest ID
+    -- (it would be echoed into peers' setstage console commands — reject).
+    if not questId:match("^[%w_%-]+$") or #questId > 64 then return end
+    if isIgnored(questId) then return end
+
+    local now = os.time()
+    if not sender.qs_win or now - sender.qs_win >= QS_WINDOW_S then
+        sender.qs_win, sender.qs_n = now, 0
+    end
+    sender.qs_n = sender.qs_n + 1
+    if sender.qs_n > QS_MAX then
+        if sender.qs_n == QS_MAX + 1 then
+            local store = require("server.db.store")
+            store.logAudit(char_id, "QUEST_SPAM",
+                (">%d QUEST_STAGE in %ds, dropping"):format(QS_MAX, QS_WINDOW_S))
+        end
+        return
+    end
 
     if isGlobal(questId) then
         local current = store.getGlobalQuestStage(questId)
