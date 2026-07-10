@@ -50,6 +50,17 @@ static std::thread             g_pollThread;
 
 static constexpr int GHOST_SLOTS = 4;
 
+// Parse a full-range uint32 for a key. JF() goes through float and loses
+// precision above 2^24 — never use it for refIDs/sids.
+static uint32_t JU(const std::string& s, const char* key) {
+    std::string k = std::string("\"") + key + "\":";
+    auto p = s.find(k);
+    if (p == std::string::npos) return 0;
+    p += k.size();
+    while (p < s.size() && s[p] == ' ') p++;
+    return (uint32_t)strtoul(s.c_str() + p, nullptr, 10);
+}
+
 // Parse a float from a JSON string without external library.
 static float JF(const std::string& s, const char* key) {
     std::string k = std::string("\"") + key + "\":";
@@ -982,6 +993,12 @@ static void PollLoop() {
                 NpcSync_OnDamageRequest(
                     (uint32_t)(int)JF(pkt.raw, "ref_id"),
                     (int)JF(pkt.raw, "amount"));
+                break;
+
+            case PacketType::NpcDamageSid:
+                // We are the authority; sid is OUR local refID for the mob.
+                // Same queued damageav path as static NPC_DAMAGE.
+                NpcSync_OnDamageRequest(JU(pkt.raw, "sid"), (int)JF(pkt.raw, "amount"));
                 break;
 
             case PacketType::DamageTaken: {

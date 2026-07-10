@@ -621,6 +621,26 @@ function M.handleNpcDamage(char_id, pkt)
         type = "NPC_DAMAGE", cell = cell, ref_id = ref, amount = amount }))
 end
 
+-- WP11: follower damage on a replica, keyed by sid (the authority's local
+-- refID for the mob). Routed to the cell authority only; the merged hp comes
+-- back to everyone in the authority's next NPC_SPAWNS snapshot.
+function M.handleNpcDamageSid(char_id, pkt)
+    local json   = require("cjson")
+    local cell   = tostring(pkt.cell or "")
+    local sid    = math.floor(tonumber(pkt.sid) or 0)
+    local amount = math.floor(tonumber(pkt.amount) or 0)
+    -- sid must be a dynamic refID (0xFFxxxxxx range)
+    if cell == "" or sid < 0xFF000000 or amount <= 0 or amount > 1000 then return end
+
+    local sess = session.getByCharId(char_id)
+    if not sess or sess.cell ~= cell then return end
+
+    local auth = authorities[cell]
+    if not auth or auth == char_id then return end  -- authority damages locally
+    session.sendTo(auth, json.encode({
+        type = "NPC_DAMAGE_SID", cell = cell, sid = sid, amount = amount }))
+end
+
 -- ── Teleport to a fellow player (F9) ─────────────────────────────────────────
 
 function M.handleTpRequest(char_id)

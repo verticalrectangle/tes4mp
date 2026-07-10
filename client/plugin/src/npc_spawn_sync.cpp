@@ -188,8 +188,6 @@ static void* FindFreshSpawn(void* cell, uint32_t base) {
 // ── Follower tick ─────────────────────────────────────────────────────────────
 
 static void FollowerTick(void* cell, const std::string& cellKey) {
-    (void)cellKey;
-
     // Apply the latest snapshot
     std::vector<SpawnEntry> snap;
     bool haveSnap = false;
@@ -205,12 +203,16 @@ static void FollowerTick(void* cell, const std::string& cellKey) {
             auto it = g_replicas.find(e.sid);
             if (it != g_replicas.end()) {
                 Replica& r = it->second;
-                if (r.ref && e.hp > 0 && r.lastHp > 0 && std::abs(e.hp - r.lastHp) > 5) {
+                // The authority value is truth — it already merged any
+                // NPC_DAMAGE_SID we reported (WP11). Apply on any difference,
+                // and ALWAYS track it so the damage poll below diffs against
+                // the authority's view, not our own last write.
+                if (r.ref && e.hp > 0 && r.lastHp > 0 && e.hp != r.lastHp) {
                     char buf[48];
                     snprintf(buf, sizeof(buf), "setav health %d", e.hp);
                     GameHooks_EnqueueCmdOnRef(r.ref, buf);
-                    r.lastHp = e.hp;
                 }
+                r.lastHp = e.hp;
             } else if (!g_failedSids.count(e.sid) && g_spawningSid != e.sid) {
                 Replica r;
                 r.base = e.base; r.x = e.x; r.y = e.y; r.z = e.z; r.lastHp = e.hp;
@@ -227,6 +229,23 @@ static void FollowerTick(void* cell, const std::string& cellKey) {
                 if (g_spawningSid == it->first) g_spawningSid = 0;
                 it = g_replicas.erase(it);
             } else ++it;
+        }
+    }
+
+    // WP11: our damage on replicas must merge back. A live replica sitting
+    // below the last authority-known hp means WE hit it — report the delta.
+    // The authority applies it and the merged value returns in the next
+    // snapshot (which we then apply + track above).
+    for (auto& [sid, r] : g_replicas) {
+        if (!r.ref || r.lastHp <= 0) continue;
+        int localHp = (int)ActorHp(r.ref);
+        if (localHp < r.lastHp - 1) {   // tolerance 1: float/regen noise
+            char buf[112];
+            snprintf(buf, sizeof(buf),
+                "{\"type\":\"NPC_DAMAGE_SID\",\"cell\":\"%s\",\"sid\":%u,\"amount\":%d}",
+                cellKey.c_str(), sid, r.lastHp - localHp);
+            g_network.send(buf);
+            r.lastHp = localHp;  // don't resend; next snapshot reconciles
         }
     }
 

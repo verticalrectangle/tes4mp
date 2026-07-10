@@ -856,6 +856,37 @@ def test_npc_spawns_relay():
     a.close(); b.close()
 
 
+def test_npc_damage_sid_routing():
+    """Follower NPC_DAMAGE_SID routed to authority only; static sid rejected;
+    authority-origin dropped."""
+    a = Client.connect_and_auth(fresh_token(), "SidAuth")
+    b = Client.connect_and_auth(fresh_token(), "SidPeer")
+    c = Client.connect_and_auth(fresh_token(), "SidBystander")
+
+    cell_key = "141002"
+    for cl in (a, b, c):
+        put_in_cell(cl, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    a.recv_all(0.2); b.recv_all(0.2); c.recv_all(0.2)
+
+    sid = 0xFF00BEEF
+    b.send({"type": "NPC_DAMAGE_SID", "cell": cell_key, "sid": sid, "amount": 33})
+    pkt = a.expect("NPC_DAMAGE_SID")
+    assert pkt.get("sid") == sid and pkt.get("amount") == 33, f"wrong: {pkt}"
+    c.expect_none("NPC_DAMAGE_SID", timeout=0.3)
+
+    # Static (non-dynamic) sid must be rejected
+    b.send({"type": "NPC_DAMAGE_SID", "cell": cell_key, "sid": 777, "amount": 10})
+    a.expect_none("NPC_DAMAGE_SID", timeout=0.3)
+
+    # Authority reporting its own damage must not loop back
+    a.send({"type": "NPC_DAMAGE_SID", "cell": cell_key, "sid": sid, "amount": 5})
+    a.expect_none("NPC_DAMAGE_SID", timeout=0.3)
+    b.expect_none("NPC_DAMAGE_SID", timeout=0.1)
+
+    a.close(); b.close(); c.close()
+
+
 def test_quest_sync_on_cell_entry():
     """Entering a cell re-sends QUEST_SYNC (stage parity guard)."""
     a = Client.connect_and_auth(fresh_token(), "StageParity")
@@ -1021,6 +1052,7 @@ def main():
             ("npc_hp: relay + gate",       test_npc_hp_relay),
             ("npc_damage: routing",        test_npc_damage_routing),
             ("npc_spawns: relay + filter", test_npc_spawns_relay),
+            ("npc_damage_sid: routing",    test_npc_damage_sid_routing),
             ("quests: sync on cell entry", test_quest_sync_on_cell_entry),
             ("pvp: hit routed + clamped",  test_pvp_hit),
             ("pvp: disabled gate",         test_pvp_disabled_gate),
