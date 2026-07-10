@@ -501,6 +501,8 @@ function M.handleItemTaken(char_id, pkt)
     local count = tonumber(pkt.count) or 0
     local cell  = tostring(pkt.cell or "")
     if cref == 0 or iform == 0 or count <= 0 or count > 500 or cell == "" then return end
+    -- Static refs only (dynamic 0xFFxxxxxx refs mean nothing to other clients)
+    if cref >= 0xFF000000 then return end
 
     local sess = session.getByCharId(char_id)
     if not sess or sess.cell ~= cell then return end

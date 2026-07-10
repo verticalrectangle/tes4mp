@@ -194,7 +194,11 @@ static void ScanNpcKills(void* cell, const std::string& cellKey, bool isAuthorit
     });
 }
 
-// ── Container loot scan (~2s) ─────────────────────────────────────────────────
+// ── Container + corpse loot scan (~2s) ────────────────────────────────────────
+// Dead actors are containers: looting a corpse writes the same
+// ExtraContainerChanges data. Living actors are excluded — their inventory
+// churns constantly from AI equip/unequip. Static refs only (replica corpse
+// loot needs sid translation — documented gap in docs/FULL_SYNC_PLAN.md).
 
 static void ScanContainerLoots(void* cell, const std::string& cellKey) {
     WalkCellRefs(cell, [&](void* ref, uint32_t refId) {
@@ -206,7 +210,11 @@ static void ScanContainerLoots(void* cell, const std::string& cellKey) {
         if (!base) return true;
 
         uint8_t typeId = *(uint8_t*)((char*)base + Oblivion::kForm_typeID);
-        if (typeId != Oblivion::kFormType_Container) return true;
+        bool isContainer = (typeId == Oblivion::kFormType_Container);
+        bool isCorpse    = (typeId == Oblivion::kFormType_NPC ||
+                            typeId == Oblivion::kFormType_Creature)
+                           && GetActorHp(ref) <= 0.f;
+        if (!isContainer && !isCorpse) return true;
 
         // Check presence bit for kExtraData_ContainerChanges (0x1A = 26)
         // byte index = 26/8 = 3, bit index = 26%8 = 2

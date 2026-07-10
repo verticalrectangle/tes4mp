@@ -856,6 +856,39 @@ def test_npc_spawns_relay():
     a.close(); b.close()
 
 
+def test_corpse_loot_and_dynamic_reject():
+    """ITEM_TAKEN from a corpse (static actor ref) broadcasts + persists like a
+    container; dynamic container refs are rejected."""
+    a = Client.connect_and_auth(fresh_token(), "CorpseLooter")
+    b = Client.connect_and_auth(fresh_token(), "CorpseWitness")
+
+    cell_key = "141003"
+    put_in_cell(a, 0, 0, 0, cell=int(cell_key))
+    put_in_cell(b, 0, 0, 0, cell=int(cell_key))
+    time.sleep(0.1)
+    a.recv_all(0.2); b.recv_all(0.2)
+
+    # Corpse ref is just a static ref — same path as containers
+    a.send({"type": "ITEM_TAKEN", "container_ref_id": 91001,
+            "item_form_id": 4321, "count": 2, "cell": cell_key})
+    pkt = b.expect("ITEM_SYNC")
+    assert pkt.get("container_ref_id") == 91001 and pkt.get("count") == 2, f"wrong: {pkt}"
+
+    # Dynamic (0xFFxxxxxx) ref must be rejected
+    a.send({"type": "ITEM_TAKEN", "container_ref_id": 0xFF001111,
+            "item_form_id": 4321, "count": 1, "cell": cell_key})
+    b.expect_none("ITEM_SYNC", timeout=0.3)
+
+    # Late joiner gets the corpse state on cell entry
+    c = Client.connect_and_auth(fresh_token(), "CorpseLate")
+    put_in_cell(c, 0, 0, 0, cell=int(cell_key))
+    pkt = c.expect("CONTAINER_STATE")
+    refs = [e.get("ref_id") for e in pkt.get("containers", [])]
+    assert 91001 in refs, f"corpse state missing on entry: {pkt}"
+
+    a.close(); b.close(); c.close()
+
+
 def test_npc_damage_sid_routing():
     """Follower NPC_DAMAGE_SID routed to authority only; static sid rejected;
     authority-origin dropped."""
@@ -1053,6 +1086,7 @@ def main():
             ("npc_damage: routing",        test_npc_damage_routing),
             ("npc_spawns: relay + filter", test_npc_spawns_relay),
             ("npc_damage_sid: routing",    test_npc_damage_sid_routing),
+            ("loot: corpse + dyn reject",  test_corpse_loot_and_dynamic_reject),
             ("quests: sync on cell entry", test_quest_sync_on_cell_entry),
             ("pvp: hit routed + clamped",  test_pvp_hit),
             ("pvp: disabled gate",         test_pvp_disabled_gate),
