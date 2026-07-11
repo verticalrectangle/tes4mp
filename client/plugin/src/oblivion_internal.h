@@ -62,6 +62,11 @@ static constexpr uint8_t kFormType_SoulGem     = 0x26; // SLGM
 static constexpr uint8_t kFormType_Key         = 0x27; // KEYM
 static constexpr uint8_t kFormType_AlchemyItem = 0x28; // ALCH
 
+// Placed-reference form types (TESObjectREFR and subclasses)
+static constexpr uint8_t kFormType_REFR = 0x31; // placed object
+static constexpr uint8_t kFormType_ACHR = 0x32; // placed NPC
+static constexpr uint8_t kFormType_ACRE = 0x33; // placed creature
+
 // ── ExtraData type codes (GameBSExtraData.h) ──────────────────────────────────
 static constexpr uint8_t kExtraData_ContainerChanges = 0x1A; // 26 — present when container modified
 

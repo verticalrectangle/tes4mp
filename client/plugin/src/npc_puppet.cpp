@@ -14,11 +14,18 @@
 static constexpr DWORD RELEASE_AFTER_MS = 3000;
 
 struct Puppet {
-    void*          ref       = nullptr;
+    void*          ref        = nullptr;
     Interp::Buffer interp;
-    DWORD          lastPosMs = 0;
+    DWORD          lastPosMs  = 0;
+    DWORD          writableMs = 0;    // don't frame-write before this
     bool           restrained = false;
+    bool           badRef     = false; // resolved to a non-actor — never touch
 };
+
+// setrestrained executes on a later game tick than the enqueue; frame-writing
+// world transforms into an actor still under live AI/havok is a crash. Give
+// the command queue a comfortable head start.
+static constexpr DWORD RESTRAIN_SETTLE_MS = 600;
 
 // One mutex guards the map: pushed from the network thread, managed on the
 // game tick, sampled in the Present hook. Entries are few (≤8 streamed).
@@ -68,17 +75,28 @@ void NpcPuppet_Tick(const std::string& cellKey, bool isAuthority) {
             continue;
         }
 
-        if (!p.ref) {
+        if (!p.ref && !p.badRef) {
             uint32_t key = it->first;
             // Dynamic keys are sids — translate to our local replica ref.
             // Static keys are shared refIDs — engine lookup (game thread only).
-            p.ref = (key >= 0xFF000000u)
-                        ? NpcSpawnSync_GetReplicaRef(key)
-                        : Oblivion::LookupFormByID(key);
+            void* ref = (key >= 0xFF000000u)
+                            ? NpcSpawnSync_GetReplicaRef(key)
+                            : Oblivion::LookupFormByID(key);
+            if (ref) {
+                // Only ever write into a placed actor (ACHR/ACRE). Anything
+                // else at this formID on OUR client (base form, door, ...)
+                // would get floats written at +0x2C — silent corruption.
+                uint8_t t = *(uint8_t*)((char*)ref + Oblivion::kForm_typeID);
+                if (t == Oblivion::kFormType_ACHR || t == Oblivion::kFormType_ACRE)
+                    p.ref = ref;
+                else
+                    p.badRef = true;
+            }
         }
         if (p.ref && !p.restrained) {
             GameHooks_EnqueueCmdOnRef(p.ref, "setrestrained 1");
             p.restrained = true;
+            p.writableMs = now + RESTRAIN_SETTLE_MS;
         }
         ++it;
     }
@@ -93,6 +111,9 @@ void NpcPuppet_OnFrame() {
     std::lock_guard<std::mutex> lk(g_mtx);
     for (auto& [key, p] : g_puppets) {
         if (!p.ref || !p.restrained) continue;
+        if ((int)(now - p.writableMs) < 0) continue;  // restrain not settled yet
+        // No NiNode = actor not fully loaded (cell still streaming) — skip.
+        if (!*(void**)((char*)p.ref + Oblivion::kRef_niNode)) continue;
         float x, y, z, rot;
         if (p.interp.sample(renderMs, x, y, z, rot))
             Interp::WriteRef(p.ref, x, y, z, rot);

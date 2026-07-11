@@ -724,8 +724,12 @@ static void ApplyCharLoad(const std::string& raw) {
             // Chargen already complete (joined after character creation).
             if (!startQuest.empty() && startStage > 0)
                 EnqueueCmd("setstage " + startQuest + " " + std::to_string(startStage));
+            // Deferred + guarded + same-cell-safe. A raw "coc" here ran with
+            // no transition guard, so a GHOST_APPEAR arriving at join time
+            // (peer already in the start cell) had the Present hook scanning
+            // a world mid-teardown — crashed whichever player joined second.
             if (!startCell.empty())
-                EnqueueCmd("coc " + startCell);
+                SetPendingCoc(SanitiseForCmd(startCell));
             // Upload actual starting stats — race/class/birthsign already applied.
             g_sendInitialSave = true;
         }
