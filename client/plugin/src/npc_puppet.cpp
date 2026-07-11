@@ -77,6 +77,9 @@ void NpcPuppet_Tick(const std::string& cellKey, bool isAuthority) {
 
         if (!p.ref && !p.badRef) {
             uint32_t key = it->first;
+            // 0x14 is PlayerRef on EVERY client — puppeting it would drive
+            // this player's own character with someone else's positions.
+            if (key == Oblivion::kPlayerRefID) { p.badRef = true; ++it; continue; }
             // Dynamic keys are sids — translate to our local replica ref.
             // Static keys are shared refIDs — engine lookup (game thread only).
             void* ref = (key >= 0xFF000000u)

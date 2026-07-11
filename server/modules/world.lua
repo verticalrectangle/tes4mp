@@ -487,6 +487,7 @@ function M.handleNpcKilled(char_id, pkt)
     if ref_id == 0 or cell == "" then return end
     -- Reject dynamic refs (formIds > 0xFF000000 are runtime-placed)
     if ref_id > 0xFF000000 then return end
+    if ref_id == 0x14 then return end  -- PlayerRef: never a syncable NPC
 
     local sess = session.getByCharId(char_id)
     if not sess or sess.cell ~= cell then return end
@@ -508,7 +509,7 @@ function M.handleItemTaken(char_id, pkt)
     local cell  = tostring(pkt.cell or "")
     if cref == 0 or iform == 0 or count <= 0 or count > 500 or cell == "" then return end
     -- Static refs only (dynamic 0xFFxxxxxx refs mean nothing to other clients)
-    if cref >= 0xFF000000 then return end
+    if cref >= 0xFF000000 or cref == 0x14 then return end
 
     local sess = session.getByCharId(char_id)
     if not sess or sess.cell ~= cell then return end
@@ -585,7 +586,7 @@ function M.handleNpcHp(char_id, pkt)
         if type(e) == "table" then
             local ref = math.floor(tonumber(e.ref) or 0)
             local hp  = math.floor(tonumber(e.hp) or -1)
-            if ref > 0 and ref < 0xFF000000 and hp >= 0 then
+            if ref > 0 and ref < 0xFF000000 and ref ~= 0x14 and hp >= 0 then
                 npcs[#npcs + 1] = { ref = ref, hp = hp }
             end
         end
@@ -644,7 +645,7 @@ function M.handleNpcPos(char_id, pkt)
         if type(e) == "table" then
             local ref = math.floor(tonumber(e.ref) or 0)
             local x, y, z, rot = finite(e.x), finite(e.y), finite(e.z), finite(e.rot)
-            if ref > 0 and x and y and z and rot then
+            if ref > 0 and ref ~= 0x14 and x and y and z and rot then
                 npcs[#npcs + 1] = { ref = ref, x = x, y = y, z = z, rot = rot }
             end
         end
@@ -661,7 +662,7 @@ function M.handleNpcDamage(char_id, pkt)
     local cell   = tostring(pkt.cell or "")
     local ref    = math.floor(tonumber(pkt.ref_id) or 0)
     local amount = math.floor(tonumber(pkt.amount) or 0)
-    if cell == "" or ref <= 0 or amount <= 0 or amount > 1000 then return end
+    if cell == "" or ref <= 0 or ref == 0x14 or amount <= 0 or amount > 1000 then return end
 
     local sess = session.getByCharId(char_id)
     if not sess or sess.cell ~= cell then return end

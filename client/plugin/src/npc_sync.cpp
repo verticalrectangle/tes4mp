@@ -95,6 +95,9 @@ static void ApplyPendingOps() {
         std::swap(ops, g_pendingOps);
     }
     for (const RefOp& op : ops) {
+        // Never run a mirrored op on the player's own ref — a bad or stale
+        // server record keyed on 0x14 would kill/damage/strip THIS player.
+        if (op.refId == Oblivion::kPlayerRefID) continue;
         void* ref = Oblivion::LookupFormByID(op.refId);
         if (!ref) continue;  // not loaded on this client — nothing to mirror
 
@@ -171,7 +174,7 @@ static void WalkCellRefs(void* cell, Fn cb) {
 static void ScanNpcKills(void* cell, const std::string& cellKey, bool isAuthority) {
     WalkCellRefs(cell, [&](void* ref, uint32_t refId) {
         // Skip player, ghosts, dynamic refs (formId > 0xFF000000 = runtime-placed)
-        if (refId == 0) return true;
+        if (refId == 0 || refId == Oblivion::kPlayerRefID) return true;
         if ((refId & 0xFF000000) != 0) return true;  // skip dynamic refs
         if (GhostSystem_IsGhostRef(refId)) return true;
 
@@ -227,7 +230,7 @@ static void ScanNpcKills(void* cell, const std::string& cellKey, bool isAuthorit
 
 static void ScanContainerLoots(void* cell, const std::string& cellKey) {
     WalkCellRefs(cell, [&](void* ref, uint32_t refId) {
-        if (refId == 0) return true;
+        if (refId == 0 || refId == Oblivion::kPlayerRefID) return true;
         if ((refId & 0xFF000000) != 0) return true;
         if (GhostSystem_IsGhostRef(refId)) return true;
 
@@ -347,7 +350,7 @@ static void ScanWorldItems(void* cell, const std::string& cellKey) {
 // ── NPC HP authority scan (~1s, authority only) ───────────────────────────────
 
 static bool IsActorRef(void* ref, uint32_t refId) {
-    if (refId == 0) return false;
+    if (refId == 0 || refId == Oblivion::kPlayerRefID) return false;
     if ((refId & 0xFF000000) != 0) return false;       // dynamic (runtime-placed)
     if (GhostSystem_IsGhostRef(refId)) return false;
     void* base = *(void**)((char*)ref + Oblivion::kRef_baseForm);

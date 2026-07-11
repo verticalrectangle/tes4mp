@@ -9,6 +9,11 @@ namespace Oblivion {
 // ── Player global ──────────────────────────────────────────────────────────────
 static constexpr uintptr_t kPlayerPtr = 0x00B333C4; // TESObjectREFR**
 
+// PlayerRef formID. The player IS a static NPC-type actor ref (0x14), so every
+// "find NPCs in the cell" walk matches it — and anything keyed on it resolves
+// to the OTHER player's own character on their machine. Exclude it everywhere.
+static constexpr uint32_t kPlayerRefID = 0x14;
+
 // ── Engine functions (xOBSE bindings for 1.2.416) ─────────────────────────────
 // TESForm* LookupFormByID(UInt32 formId) — works for base forms and loaded refs.
 // Game thread only (reads the global form table).
