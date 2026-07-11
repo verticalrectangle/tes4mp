@@ -29,6 +29,17 @@ void GameHooks_EnqueueCmd(const char* cmd);
 // refr must stay valid until the next game tick (~200ms).
 void GameHooks_EnqueueCmdOnRef(void* refr, const char* cmd);
 
+// Queue a command that references a form. The RunScriptLine compiler can't
+// resolve form names/formID literals at runtime, so the form is bound to a
+// script variable via GetFormFromMod (vanilla forms only). `line` uses %R as
+// the form placeholder (e.g. "SetStage %R 90"); rawFallback is the legacy
+// literal command tried last (may be nullptr). Thread-safe.
+#ifdef __cplusplus
+#include <cstdint>
+void GameHooks_EnqueueFormCmd(void* refr, uint32_t formId,
+                              const char* line, const char* rawFallback);
+#endif
+
 // Returns the player's current raw HP (from the last CHAR_SAVE checkpoint, 0 if unknown).
 int GameHooks_GetPlayerHp();
 

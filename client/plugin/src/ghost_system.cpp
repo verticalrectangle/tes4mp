@@ -316,19 +316,18 @@ static void DrainEvents() {
 
 // ── Per-frame update (Present hook — game thread) ─────────────────────────────
 
-// Dress a claimed ghost ref in the peer's synced equipment.
-// NOTE: additem/equipitem take hex formID args — pending verification that hex
-// form literals parse in this compile path (RunCmd FAILED lines will tell).
+// Dress a claimed ghost ref in the peer's synced equipment. Form-arg literals
+// don't compile in RunScriptLine — go through the %R/GetFormFromMod chain.
 static void ApplyEquip(Ghost& gh) {
     if (gh.slot < 0 || !g_slotRefs[gh.slot]) return;
     void* ref = g_slotRefs[gh.slot];
-    char buf[64];
+    char raw[64];
     EnqRef(ref, "removeallitems");  // strip the guard base outfit first
     for (uint32_t item : gh.equip) {
-        snprintf(buf, sizeof(buf), "additem %08X 1", item);
-        EnqRef(ref, buf);
-        snprintf(buf, sizeof(buf), "equipitem %08X", item);
-        EnqRef(ref, buf);
+        snprintf(raw, sizeof(raw), "additem %08X 1", item);
+        GameHooks_EnqueueFormCmd(ref, item, "AddItem %R 1", raw);
+        snprintf(raw, sizeof(raw), "equipitem %08X", item);
+        GameHooks_EnqueueFormCmd(ref, item, "EquipItem %R", raw);
     }
     gh.equipDirty = false;
 }
@@ -365,7 +364,7 @@ static void TickGhosts() {
                 // PlaceAtMe creates an enabled ref near the player in the current cell.
                 char buf[64];
                 snprintf(buf, sizeof(buf), "player.PlaceAtMe %08X 1", base);
-                EnqCmd(buf);
+                GameHooks_EnqueueFormCmd(nullptr, base, "player.PlaceAtMe %R 1", buf);
                 continue;
             }
             if (g_spawnInFlight != charId) continue;  // queued behind another spawn
@@ -406,7 +405,8 @@ static void TickGhosts() {
                 }
                 gh.spawnedMs    = now;
                 gh.phaseReadyMs = now + SPAWN_WAIT_MS;
-                EnqCmd(cmdBuf);
+                GameHooks_EnqueueFormCmd(nullptr, g_ghostBase,
+                                         "player.PlaceAtMe %R 1", cmdBuf);
                 continue;
             }
 

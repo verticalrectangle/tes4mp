@@ -39,6 +39,8 @@ static void DBG(const std::string& msg) {
 struct QueuedCmd {
     void*       refr;  // executes on this ref (null = global/console context)
     std::string cmd;
+    std::string alt1;  // fallback if cmd fails to compile/run ("" = none)
+    std::string alt2;  // second fallback
 };
 static std::queue<QueuedCmd>   g_cmdQueue;
 static std::mutex              g_cmdMutex;
@@ -191,11 +193,12 @@ static std::vector<NpcHpEntry> ParseNpcHpArray(const std::string& s) {
 
 // ── Console command helpers ───────────────────────────────────────────────────
 
-static void RunCmd(const std::string& cmd, void* refr = nullptr) {
-    if (!g_console) return;
+static bool RunCmd(const std::string& cmd, void* refr = nullptr) {
+    if (!g_console) return false;
     bool ok = g_console->RunScriptLine2(cmd.c_str(), (TESObjectREFR*)refr, true);
     if (!ok)
         DBG("RunCmd FAILED: " + cmd + (refr ? " (on ref)" : ""));
+    return ok;
 }
 
 static void EnqueueCmd(const std::string& cmd) {
@@ -212,6 +215,51 @@ void GameHooks_EnqueueCmd(const char* cmd) {
 void GameHooks_EnqueueCmdOnRef(void* refr, const char* cmd) {
     std::lock_guard<std::mutex> lk(g_cmdMutex);
     g_cmdQueue.push({ refr, cmd });
+}
+
+// ── Form-argument commands ────────────────────────────────────────────────────
+// The RunScriptLine temp-script compiler CANNOT resolve form arguments at
+// runtime — editor IDs (setstage MQ01, additem gold001) and numeric formIDs
+// (PlaceAtMe 00096765, prid 14) all fail to compile, ~always (verified across
+// 1.5M lines of tes4mp_debug.txt: 118 failures, 2 flukes; commands without
+// form args never fail). Cells are the exception (coc works — their editorID
+// table survives at runtime).
+//
+// Workaround: never name a form in a command. Bind it to a script variable
+// via GetFormFromMod (mod + numeric ID — no name resolution involved) and use
+// the variable. Two syntax variants are tried (vanilla `set`, OBSE `let`),
+// then the legacy raw line as a last resort — each attempt logs, so one
+// playtest shows which primitive this engine accepts.
+
+static std::string FormCmdVariant(bool useLet, uint32_t formId, std::string line) {
+    size_t p = line.find("%R");
+    if (p == std::string::npos) return line;
+    line.replace(p, 2, "TES4MPRef");
+    char bind[96];
+    snprintf(bind, sizeof(bind),
+        useLet ? "let TES4MPRef := GetFormFromMod \"Oblivion.esm\" %u"
+               : "set TES4MPRef to GetFormFromMod \"Oblivion.esm\" %u",
+        formId & 0x00FFFFFF);
+    return "ref TES4MPRef\r\n" + std::string(bind) + "\r\n" + line;
+}
+
+// line uses %R where the form goes, e.g. "SetStage %R 90".
+// rawFallback is the legacy full command line ("" = none).
+void GameHooks_EnqueueFormCmd(void* refr, uint32_t formId,
+                              const char* line, const char* rawFallback) {
+    QueuedCmd qc;
+    qc.refr = refr;
+    if ((formId >> 24) == 0 && formId != 0) {   // vanilla forms only
+        qc.cmd  = FormCmdVariant(false, formId, line);  // set-syntax
+        qc.alt1 = FormCmdVariant(true,  formId, line);  // let-syntax
+        qc.alt2 = rawFallback ? rawFallback : "";
+    } else {
+        // Non-vanilla form: GetFormFromMod("Oblivion.esm") can't bind it.
+        qc.cmd = rawFallback ? rawFallback : "";
+        if (qc.cmd.empty()) return;
+    }
+    std::lock_guard<std::mutex> lk(g_cmdMutex);
+    g_cmdQueue.push(std::move(qc));
 }
 
 // Sanitise a string for use inside a quoted console command argument.
@@ -613,7 +661,7 @@ static void TickChargen() {  // game thread only (IsMenuMode + console cmds)
 
     case ChargenState::Teleport:
         if (!c.startQuest.empty() && c.startStage > 0)
-            EnqueueCmd("setstage " + c.startQuest + " " + std::to_string(c.startStage));
+            QuestSync_ApplyStage(c.startQuest, c.startStage);
         if (!c.startCell.empty()) {
             BeginTransitionGuard(3000);
             EnqueueCmd("coc " + c.startCell);
@@ -721,7 +769,11 @@ static void ApplyCharLoad(const std::string& raw) {
         // New character — server tells us where to start.
         int gold = json::getInt(raw, "gold");
         if (gold > 0)
-            EnqueueCmd("player.additem gold001 " + std::to_string(gold));
+        {
+            std::string line = "player.AddItem %R " + std::to_string(gold);
+            std::string raw  = "player.additem gold001 " + std::to_string(gold);
+            GameHooks_EnqueueFormCmd(nullptr, 0xF /*Gold001*/, line.c_str(), raw.c_str());
+        }
 
         std::string startQuest = json::getStr(raw, "start_quest");
         int         startStage = json::getInt(raw, "start_quest_stage");
@@ -735,7 +787,7 @@ static void ApplyCharLoad(const std::string& raw) {
         } else {
             // Chargen already complete (joined after character creation).
             if (!startQuest.empty() && startStage > 0)
-                EnqueueCmd("setstage " + startQuest + " " + std::to_string(startStage));
+                QuestSync_ApplyStage(startQuest, startStage);
             // Deferred + guarded + same-cell-safe. A raw "coc" here ran with
             // no transition guard, so a GHOST_APPEAR arriving at join time
             // (peer already in the start cell) had the Present hook scanning
@@ -787,34 +839,38 @@ static void PollLoop() {
                 ApplyCharLoad(pkt.raw);
                 break;
 
-            // Quest sync
-            case PacketType::QuestStage: {
-                std::ostringstream ss; ss << "setstage " << pkt.strField << " " << pkt.intField;
-                EnqueueCmd(ss.str());
+            // Quest sync — applied via quest_sync (form-resolved on game thread;
+            // a literal "setstage <id>" never compiles in RunScriptLine)
+            case PacketType::QuestStage:
+                QuestSync_ApplyStage(pkt.strField, pkt.intField);
                 break;
-            }
             case PacketType::QuestSync:
-                for (auto& q : json::getQuestArray(pkt.raw)) {
-                    std::ostringstream ss; ss << "setstage " << q.questId << " " << q.stage;
-                    EnqueueCmd(ss.str());
-                }
+                for (auto& q : json::getQuestArray(pkt.raw))
+                    QuestSync_ApplyStage(q.questId, q.stage);
                 break;
 
-            // Admin actions
+            // Admin actions. item_id arrives as a hex formID string; form-arg
+            // literals don't compile, so route through the %R form path.
             case PacketType::GiveItem: {
-                std::ostringstream ss; ss << "player.additem " << pkt.strField << " " << pkt.intField;
-                EnqueueCmd(ss.str());
+                uint32_t fid = (uint32_t)strtoul(pkt.strField.c_str(), nullptr, 16);
+                std::ostringstream line; line << "player.AddItem %R " << pkt.intField;
+                std::ostringstream raw;  raw  << "player.additem " << pkt.strField << " " << pkt.intField;
+                GameHooks_EnqueueFormCmd(nullptr, fid, line.str().c_str(), raw.str().c_str());
                 EnqueueMsg("[TES4MP] Received: " + std::to_string(pkt.intField) + "x " + pkt.strField);
                 break;
             }
             case PacketType::TakeItem: {
-                std::ostringstream ss; ss << "player.removeitem " << pkt.strField << " " << pkt.intField;
-                EnqueueCmd(ss.str());
+                uint32_t fid = (uint32_t)strtoul(pkt.strField.c_str(), nullptr, 16);
+                std::ostringstream line; line << "player.RemoveItem %R " << pkt.intField;
+                std::ostringstream raw;  raw  << "player.removeitem " << pkt.strField << " " << pkt.intField;
+                GameHooks_EnqueueFormCmd(nullptr, fid, line.str().c_str(), raw.str().c_str());
                 break;
             }
             case PacketType::AddGold: {
-                std::ostringstream ss; ss << "player.additem gold001 " << pkt.intField;
-                EnqueueCmd(ss.str());
+                std::ostringstream line; line << "player.AddItem %R " << pkt.intField;
+                std::ostringstream raw;  raw  << "player.additem gold001 " << pkt.intField;
+                GameHooks_EnqueueFormCmd(nullptr, 0xF /*Gold001*/,
+                                         line.str().c_str(), raw.str().c_str());
                 break;
             }
             case PacketType::Teleport:
@@ -1168,8 +1224,16 @@ void GameHooks_Tick() {
             QueuedCmd qc = std::move(g_cmdQueue.front());
             g_cmdQueue.pop();
             DBG("RunCmd: " + qc.cmd);
-            RunCmd(qc.cmd, qc.refr);
-            DBG("RunCmd done");
+            bool ok = RunCmd(qc.cmd, qc.refr);
+            if (!ok && !qc.alt1.empty()) {
+                DBG("RunCmd alt1: " + qc.alt1);
+                ok = RunCmd(qc.alt1, qc.refr);
+            }
+            if (!ok && !qc.alt2.empty()) {
+                DBG("RunCmd alt2: " + qc.alt2);
+                ok = RunCmd(qc.alt2, qc.refr);
+            }
+            DBG(ok ? "RunCmd done" : "RunCmd exhausted");
         }
     }
 

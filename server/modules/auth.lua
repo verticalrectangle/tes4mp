@@ -24,7 +24,7 @@ end
 -- 2026 full-sync round proved version skew is undebuggable in the field
 -- (old follower code disabling new clients' ghosts, replica spawns failing
 -- silently on one side) — mismatched clients get a clear KICK instead.
-M.PROTOCOL_VERSION = 3
+M.PROTOCOL_VERSION = 4
 
 -- Stream the current client DLL: one DLL_UPDATE json line with the byte
 -- count, then the raw file. LAN-sized (a few MB); sent blocking, one-time

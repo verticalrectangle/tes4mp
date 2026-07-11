@@ -112,10 +112,14 @@ static void ApplyPendingOps() {
             GameHooks_EnqueueCmdOnRef(ref, "disable");
             g_knownDead.insert(op.refId);
             break;
-        case RefOp::RemoveItem:
+        case RefOp::RemoveItem: {
+            // Form-arg literals don't compile — bind via %R/GetFormFromMod.
+            char line[48];
+            snprintf(line, sizeof(line), "RemoveItem %%R %d", op.amount);
             snprintf(buf, sizeof(buf), "removeitem %08X %d", op.formId, op.amount);
-            GameHooks_EnqueueCmdOnRef(ref, buf);
+            GameHooks_EnqueueFormCmd(ref, op.formId, line, buf);
             break;
+        }
         case RefOp::Damage:
             snprintf(buf, sizeof(buf), "damageav health %d", op.amount);
             GameHooks_EnqueueCmdOnRef(ref, buf);

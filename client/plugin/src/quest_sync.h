@@ -12,3 +12,8 @@ void QuestSync_Tick();
 
 // Clear state on disconnect so the next connect re-baselines.
 void QuestSync_Reset();
+
+// Apply a server-pushed stage. Thread-safe (queued; resolved to a TESQuest*
+// on the game thread and executed via the GetFormFromMod command path — a
+// literal "setstage <editorId>" never compiles in RunScriptLine).
+void QuestSync_ApplyStage(const std::string& editorId, int stage);

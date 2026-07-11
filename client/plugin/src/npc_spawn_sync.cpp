@@ -159,17 +159,11 @@ static bool IssueSpawnCmd(uint32_t base, int strategy) {
     char buf[192];
     switch (strategy) {
     case 0:
-        snprintf(buf, sizeof(buf),
-            "ref TES4MPSpawnRef\r\n"
-            "let TES4MPSpawnRef := GetFormFromMod \"Oblivion.esm\" %u\r\n"
-            "player.PlaceAtMe TES4MPSpawnRef 1",
-            base & 0x00FFFFFF);
-        GameHooks_EnqueueCmd(buf);
-        return true;
-    case 1:
-        if (!HexAllDecimal(base)) return false;
+    case 1:  // one retry — the chain may have landed during a busy tick
+        // set/let/raw fallback chain — same primitive as everything else now
         snprintf(buf, sizeof(buf), "player.PlaceAtMe %08X 1", base);
-        GameHooks_EnqueueCmd(buf);
+        GameHooks_EnqueueFormCmd(nullptr, base, "player.PlaceAtMe %R 1",
+                                 HexAllDecimal(base) ? buf : nullptr);
         return true;
     default:
         return false;
