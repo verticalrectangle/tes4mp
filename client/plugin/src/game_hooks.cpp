@@ -438,6 +438,7 @@ static void TickAuth() {
             json::str("type",  "HELLO"),
             json::str("token", tok),
             json::str("name",  name),
+            json::num("ver",   TES4MP_PROTOCOL_VERSION),
         }));
         // Stays in WaitingHello until server replies with CHAR_LOAD
     }

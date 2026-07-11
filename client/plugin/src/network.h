@@ -17,6 +17,10 @@
    static constexpr SOCKET INVALID_SOCKET = (SOCKET)(~0);
 #endif
 
+// Client/server protocol version — must match server auth.lua PROTOCOL_VERSION.
+// Sent in HELLO; mismatched clients are kicked with an update message.
+static constexpr int TES4MP_PROTOCOL_VERSION = 2;
+
 // Packet types the client will receive from the server.
 enum class PacketType : int {
     None            = 0,

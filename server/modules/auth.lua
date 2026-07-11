@@ -20,10 +20,27 @@ local function finalize(sock, info, char, config, is_new)
     session.addSession(sock, info, char, config, is_new)
 end
 
+-- Bump whenever the client/server protocol changes incompatibly. The July
+-- 2026 full-sync round proved version skew is undebuggable in the field
+-- (old follower code disabling new clients' ghosts, replica spawns failing
+-- silently on one side) — mismatched clients get a clear KICK instead.
+M.PROTOCOL_VERSION = 2
+
 function M.handleHello(sock, info, pkt, config)
     local token = tostring(pkt.token or "")
     if #token < 16 then
         send(sock, { type = "KICK", reason = "bad token" })
+        return
+    end
+
+    local ver = tonumber(pkt.ver) or 0
+    if ver ~= M.PROTOCOL_VERSION then
+        send(sock, { type = "KICK",
+            reason = ("TES4MP.dll is out of date (protocol %d, server needs %d). "
+                   .. "Update Data\\OBSE\\Plugins\\TES4MP.dll from the server's "
+                   .. "dist folder and reconnect."):format(ver, M.PROTOCOL_VERSION) })
+        print(("[auth] rejected client protocol %d from %s (need %d)")
+            :format(ver, info.addr or "?", M.PROTOCOL_VERSION))
         return
     end
     -- Token prefix in the log: distinguishes "two machines" from "copied install"

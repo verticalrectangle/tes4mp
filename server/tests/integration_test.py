@@ -93,7 +93,7 @@ class Client:
     @classmethod
     def connect_and_auth(cls, token: str, name: str, port: int = PORT) -> "Client":
         c = cls(port)
-        c.send({"type": "HELLO", "token": token, "name": name})
+        c.send({"type": "HELLO", "token": token, "name": name, "ver": 2})
         c.expect("CHAR_LOAD")
         return c
 
@@ -193,7 +193,7 @@ def put_in_cell(client: Client, x: float, y: float, z: float,
 def test_auth_new():
     token = fresh_token()
     c = Client()
-    c.send({"type": "HELLO", "token": token, "name": "NewPlayer"})
+    c.send({"type": "HELLO", "token": token, "name": "NewPlayer", "ver": 2})
     pkt = c.expect("CHAR_LOAD")
     assert pkt.get("name") == "NewPlayer", f"name mismatch: {pkt.get('name')}"
     # Client-side quest poller is driven by this list
@@ -210,15 +210,30 @@ def test_auth_returning():
     time.sleep(0.1)
     # Second connect with same token returns same char
     c2 = Client()
-    c2.send({"type": "HELLO", "token": token, "name": "ReturnPlayer"})
+    c2.send({"type": "HELLO", "token": token, "name": "ReturnPlayer", "ver": 2})
     pkt = c2.expect("CHAR_LOAD")
     assert pkt.get("name") == "ReturnPlayer", f"name mismatch: {pkt.get('name')}"
     c2.close()
 
 
+def test_auth_version_mismatch():
+    """HELLO with a missing or stale protocol version → KICK with update hint."""
+    c = Client()
+    c.send({"type": "HELLO", "token": fresh_token(), "name": "OldClient"})  # no ver
+    pkt = c.expect("KICK")
+    assert "out of date" in pkt.get("reason", ""), f"wrong reason: {pkt}"
+    c.close()
+
+    c = Client()
+    c.send({"type": "HELLO", "token": fresh_token(), "name": "OldClient", "ver": 1})
+    pkt = c.expect("KICK")
+    assert "out of date" in pkt.get("reason", ""), f"wrong reason: {pkt}"
+    c.close()
+
+
 def test_auth_bad_token():
     c = Client()
-    c.send({"type": "HELLO", "token": "short", "name": "Hacker"})
+    c.send({"type": "HELLO", "token": "short", "name": "Hacker", "ver": 2})
     pkt = c.expect("KICK")
     assert pkt.get("type") == "KICK"
     c.close()
@@ -228,7 +243,7 @@ def test_reveal_markers_on_join():
     """Server sends REVEAL_MARKERS immediately after CHAR_LOAD."""
     token = fresh_token()
     c = Client()
-    c.send({"type": "HELLO", "token": token, "name": "MapPlayer"})
+    c.send({"type": "HELLO", "token": token, "name": "MapPlayer", "ver": 2})
     # CHAR_LOAD comes first; REVEAL_MARKERS should follow
     pkts = c.recv_all(1.0)
     types = [p.get("type") for p in pkts]
@@ -413,7 +428,7 @@ def test_char_save_skill_clamp():
     # Reconnect and check that the skill is clamped (10 + 5 = 15, not 60)
     time.sleep(0.1)
     b = Client()
-    b.send({"type": "HELLO", "token": token, "name": "ClampTest"})
+    b.send({"type": "HELLO", "token": token, "name": "ClampTest", "ver": 2})
     pkt = b.expect("CHAR_LOAD")
     blade = pkt.get("skills", {}).get("Blade")
     assert blade is not None, f"Blade not in skills: {pkt.get('skills')}"
@@ -441,7 +456,7 @@ def test_char_save_level_clamp():
 
     time.sleep(0.1)
     b = Client()
-    b.send({"type": "HELLO", "token": token, "name": "LevelClamp"})
+    b.send({"type": "HELLO", "token": token, "name": "LevelClamp", "ver": 2})
     pkt = b.expect("CHAR_LOAD")
     level = pkt.get("level")
     assert level == 2, f"Level not clamped to 2: {level}"
@@ -471,7 +486,7 @@ def test_zero_stats_rejected():
 
     time.sleep(0.1)
     b = Client()
-    b.send({"type": "HELLO", "token": token, "name": "ZeroStats"})
+    b.send({"type": "HELLO", "token": token, "name": "ZeroStats", "ver": 2})
     pkt = b.expect("CHAR_LOAD")
     assert pkt.get("attributes", {}).get("Strength") == 40, \
         f"zero attrs persisted: {pkt.get('attributes')}"
@@ -511,7 +526,7 @@ def test_start_cell_until_tutorial_done():
     time.sleep(0.1)
 
     b = Client()
-    b.send({"type": "HELLO", "token": token, "name": "SewerBound"})
+    b.send({"type": "HELLO", "token": token, "name": "SewerBound", "ver": 2})
     pkt = b.expect("CHAR_LOAD")
     assert pkt.get("cell") == "ImperialSewers03", f"start cell missing: {pkt.get('cell')}"
     b.close()
@@ -522,11 +537,11 @@ def test_duplicate_name_create():
     engine default) → both get characters, second one suffixed — no KICK,
     no UNIQUE-constraint packet error."""
     a = Client(PORT)
-    a.send({"type": "HELLO", "token": fresh_token(), "name": "Bendu Olo"})
+    a.send({"type": "HELLO", "token": fresh_token(), "name": "Bendu Olo", "ver": 2})
     pa = a.expect("CHAR_LOAD")
 
     b = Client(PORT)
-    b.send({"type": "HELLO", "token": fresh_token(), "name": "Bendu Olo"})
+    b.send({"type": "HELLO", "token": fresh_token(), "name": "Bendu Olo", "ver": 2})
     pb = b.expect("CHAR_LOAD")
 
     na, nb = pa.get("name"), pb.get("name")
@@ -549,7 +564,7 @@ def test_rename_to_taken_name():
 
     # Reconnect b claiming the taken name — must still get CHAR_LOAD, unrenamed
     c = Client()
-    c.send({"type": "HELLO", "token": token, "name": "NameOwner"})
+    c.send({"type": "HELLO", "token": token, "name": "NameOwner", "ver": 2})
     pkt = c.expect("CHAR_LOAD")
     assert pkt.get("name") == "SomeoneElse", f"rename collision mishandled: {pkt.get('name')}"
     c.close()
@@ -561,7 +576,7 @@ def test_duplicate_token_rejected():
     a = Client.connect_and_auth(token, "TokenOwner")
 
     b = Client()
-    b.send({"type": "HELLO", "token": token, "name": "TokenThief"})
+    b.send({"type": "HELLO", "token": token, "name": "TokenThief", "ver": 2})
     pkt = b.expect("KICK")
     assert "already online" in pkt.get("reason", ""), f"wrong reason: {pkt}"
     b.close()
@@ -658,7 +673,7 @@ def test_weather_sync():
 
     # New joiner should also get WEATHER_SYNC on join
     c = Client()
-    c.send({"type": "HELLO", "token": fresh_token(), "name": "WeatherC"})
+    c.send({"type": "HELLO", "token": fresh_token(), "name": "WeatherC", "ver": 2})
     pkts = c.recv_all(1.0)
     types = [p.get("type") for p in pkts]
     assert "WEATHER_SYNC" in types, f"WEATHER_SYNC not in join packets: {types}"
@@ -744,7 +759,7 @@ def test_bounty():
     # Rejoin and verify bounty is carried forward (it'll be in session state)
     time.sleep(0.1)
     b = Client()
-    b.send({"type": "HELLO", "token": token, "name": "Criminal"})
+    b.send({"type": "HELLO", "token": token, "name": "Criminal", "ver": 2})
     pkt = b.expect("CHAR_LOAD")
     bounties = pkt.get("bounties", {})
     assert bounties.get("Cyrodiil", 0) == 150, f"bounty wrong: {bounties}"
@@ -757,7 +772,7 @@ def test_bounty():
     # Rejoin — bounty should be 0
     time.sleep(0.1)
     c = Client()
-    c.send({"type": "HELLO", "token": token, "name": "Criminal"})
+    c.send({"type": "HELLO", "token": token, "name": "Criminal", "ver": 2})
     pkt = c.expect("CHAR_LOAD")
     bounties = pkt.get("bounties", {})
     assert bounties.get("Cyrodiil", 0) == 0, f"bounty not cleared: {bounties}"
@@ -1161,6 +1176,7 @@ def main():
             ("auth: new player",          test_auth_new),
             ("auth: returning player",     test_auth_returning),
             ("auth: bad token → KICK",     test_auth_bad_token),
+            ("auth: version mismatch",     test_auth_version_mismatch),
             ("join: REVEAL_MARKERS sent",  test_reveal_markers_on_join),
             ("ghost: appear + leave",      test_ghost_appear_leave),
             ("ghost: fast travel flag",    test_fast_travel_flag),
