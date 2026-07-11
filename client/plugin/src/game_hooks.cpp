@@ -1087,7 +1087,10 @@ static void PollLoop() {
 static void AttemptConnect(bool verbose = true) {
     if (g_network.isConnected()) return;
     Config cfg = LoadConfig();
-    DBG("connecting to " + cfg.host + ":" + std::to_string(cfg.port));
+    // Protocol in the log: "is the right DLL actually loaded?" is the first
+    // question in every version-skew hunt — answer it up front.
+    DBG("connecting to " + cfg.host + ":" + std::to_string(cfg.port)
+        + " (client protocol " + std::to_string(TES4MP_PROTOCOL_VERSION) + ")");
     if (g_network.connect(cfg.host, cfg.port)) {
         DBG("connect OK");
         g_phase = AuthPhase::WaitingHello;
