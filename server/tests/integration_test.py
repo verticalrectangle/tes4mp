@@ -517,6 +517,25 @@ def test_start_cell_until_tutorial_done():
     b.close()
 
 
+def test_duplicate_name_create():
+    """Two NEW tokens with the same name (both connect mid-chargen with the
+    engine default) → both get characters, second one suffixed — no KICK,
+    no UNIQUE-constraint packet error."""
+    a = Client(PORT)
+    a.send({"type": "HELLO", "token": fresh_token(), "name": "Bendu Olo"})
+    pa = a.expect("CHAR_LOAD")
+
+    b = Client(PORT)
+    b.send({"type": "HELLO", "token": fresh_token(), "name": "Bendu Olo"})
+    pb = b.expect("CHAR_LOAD")
+
+    na, nb = pa.get("name"), pb.get("name")
+    assert na == "Bendu Olo", f"first create renamed: {na}"
+    assert nb and nb != na, f"second create not deduped: {nb!r}"
+
+    a.close(); b.close()
+
+
 def test_rename_to_taken_name():
     """HELLO with a name another character owns must not error — keep old name."""
     a = Client.connect_and_auth(fresh_token(), "NameOwner")
@@ -1157,6 +1176,7 @@ def main():
             ("teleport: TP_REQUEST",       test_tp_request),
             ("auth: duplicate token",      test_duplicate_token_rejected),
             ("auth: taken-name rename",    test_rename_to_taken_name),
+            ("auth: duplicate-name create", test_duplicate_name_create),
             ("auth: start cell persists",  test_start_cell_until_tutorial_done),
             ("speed hack: rejection",      test_speed_hack_rejection),
             ("dungeon: clear broadcast",   test_dungeon_clear),

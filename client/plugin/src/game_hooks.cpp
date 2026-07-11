@@ -280,6 +280,14 @@ static std::string ReadPlayerName() {
     return data ? std::string(data) : std::string{};
 }
 
+// The player hasn't confirmed a name yet. "Bendu Olo" is the default on the
+// Oblivion.esm player record (what ReadPlayerName returns during chargen —
+// the readiness poll connects before the name menu, so HELLO/CHAR_SAVE must
+// never treat it as a real name); "Prisoner" covers alternate-start setups.
+static bool IsPlaceholderName(const std::string& name) {
+    return name.empty() || name == "Prisoner" || name == "Bendu Olo";
+}
+
 // True once a world is loaded (player exists and sits in a cell) — the
 // earliest point where connecting and running console commands is safe.
 static bool InWorld() {
@@ -424,7 +432,7 @@ static void TickAuth() {
         std::string name = ReadPlayerName();
         // Pre-chargen join: no name yet. Use a token-derived placeholder
         // (names are UNIQUE server-side); CHAR_SAVE renames once chargen ends.
-        if (name.empty()) name = "Adventurer-" + tok.substr(0, 4);
+        if (IsPlaceholderName(name)) name = "Adventurer-" + tok.substr(0, 4);
         DBG("TickAuth: sending HELLO name=" + name);
         g_network.send(json::obj({
             json::str("type",  "HELLO"),
@@ -495,6 +503,9 @@ static bool ReadAndSendCharSave() {
             if (curAttrs[i] != g_lastSent.attrs[i]) attrsDirty = true;
 
     std::string curName = ReadPlayerName();
+    // Server renames from CHAR_SAVE — never let a placeholder become the name
+    // (empty is skipped server-side by the length check).
+    if (IsPlaceholderName(curName)) curName.clear();
 
     std::ostringstream pkt;
     pkt << "{\"type\":\"CHAR_SAVE\""
@@ -718,7 +729,7 @@ static void ApplyCharLoad(const std::string& raw) {
         // No player name yet = chargen hasn't finished — take over the new-game
         // flow: teleport to the server start and chain the chargen menus.
         std::string curName = ReadPlayerName();
-        if (curName.empty() || curName == "Prisoner") {
+        if (IsPlaceholderName(curName)) {
             ChargenBegin(startCell, startQuest, startStage);
         } else {
             // Chargen already complete (joined after character creation).

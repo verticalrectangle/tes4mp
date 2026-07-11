@@ -60,6 +60,14 @@ function M.handleHello(sock, info, pkt, config)
     if #name < 2 then name = "Adventurer" end
     if #name > 24 then name = name:sub(1, 24) end
 
+    -- Names are UNIQUE. Two clients can legitimately collide (e.g. both
+    -- connect mid-chargen with the engine's default name) — suffix with the
+    -- token prefix instead of blowing up the INSERT. CHAR_SAVE renames later.
+    if store.getCharacterByName(name) then
+        name = name:sub(1, 24 - 5) .. "-" .. token:sub(1, 4)
+        print(("[auth] name taken, using %s"):format(name))
+    end
+
     char = store.createCharByToken(token, name)
     if not char then
         send(sock, { type = "KICK", reason = "Failed to create character" })
