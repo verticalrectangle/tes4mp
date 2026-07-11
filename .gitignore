@@ -20,3 +20,4 @@ C:/tes4mp_debug.txt
 *.swp
 *.swo
 __pycache__/
+server/data/*.db.bak.*
