@@ -22,8 +22,13 @@ Network::~Network() {
     WSACleanup();
 }
 
+static void CleanupUpdateLeftovers();
+
 bool Network::connect(const std::string& host, int port) {
     if (m_connected) disconnect();
+    CleanupUpdateLeftovers();
+    m_binNeed = 0;
+    m_binBuf.clear();
 
     m_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (m_sock == INVALID_SOCKET) return false;
@@ -84,12 +89,23 @@ void Network::recvLoop() {
             m_connected = false;
             break;
         }
-        buf[n] = '\0';
-        m_recvBuf += buf;
+        // Length-aware append — the DLL update stream is binary (NUL bytes).
+        m_recvBuf.append(buf, (size_t)n);
 
-        // Split on newlines — each line is one JSON packet
-        size_t pos;
-        while ((pos = m_recvBuf.find('\n')) != std::string::npos) {
+        for (;;) {
+            // Binary mode: a DLL_UPDATE header promised m_binNeed raw bytes.
+            if (m_binNeed > 0) {
+                size_t take = m_binNeed < m_recvBuf.size() ? m_binNeed
+                                                           : m_recvBuf.size();
+                m_binBuf.append(m_recvBuf, 0, take);
+                m_recvBuf.erase(0, take);
+                m_binNeed -= take;
+                if (m_binNeed > 0) break;      // wait for more data
+                finishDllUpdate();             // resume line mode below
+            }
+            // Line mode — each line is one JSON packet
+            size_t pos = m_recvBuf.find('\n');
+            if (pos == std::string::npos) break;
             std::string line = m_recvBuf.substr(0, pos);
             m_recvBuf.erase(0, pos + 1);
             if (!line.empty()) dispatchLine(line);
@@ -103,8 +119,85 @@ void Network::recvLoop() {
     m_incoming.push(p);
 }
 
+// Own DLL path on disk (empty if somehow not loaded under our name).
+static std::string SelfDllPath() {
+    HMODULE mod = GetModuleHandleA("TES4MP.dll");
+    if (!mod) return {};
+    char path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(mod, path, MAX_PATH);
+    return (n > 0 && n < MAX_PATH) ? std::string(path, n) : std::string{};
+}
+
+void Network::pushMessage(const std::string& text) {
+    Packet p;
+    p.type     = PacketType::Message;
+    p.strField = text;
+    std::lock_guard<std::mutex> lk(m_inMutex);
+    m_incoming.push(p);
+}
+
+// The full new DLL has arrived. A loaded DLL's file can't be overwritten but
+// CAN be renamed — move the running one aside and write the update in its
+// place; the next launch loads it. (One manual install of an updater-aware
+// build is required first; after that, partners never copy files again.)
+void Network::finishDllUpdate() {
+    std::string data;
+    data.swap(m_binBuf);
+
+    if (data.size() < 2 || data[0] != 'M' || data[1] != 'Z') {
+        pushMessage("[TES4MP] Update download corrupt — not applied.");
+        return;
+    }
+    std::string path = SelfDllPath();
+    if (path.empty()) {
+        pushMessage("[TES4MP] Update failed: cannot locate own DLL.");
+        return;
+    }
+    std::string old = path + ".old";
+    DeleteFileA(old.c_str());  // leftover from an even earlier update
+    if (!MoveFileExA(path.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        pushMessage("[TES4MP] Update failed: could not move current DLL aside "
+                    "- copy dist/TES4MP.dll manually.");
+        return;
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.write(data.data(), (std::streamsize)data.size())) {
+        // Try to roll back so the install isn't left with no DLL at all.
+        MoveFileExA(old.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+        pushMessage("[TES4MP] Update failed writing new DLL - copy "
+                    "dist/TES4MP.dll manually.");
+        return;
+    }
+    out.close();
+    pushMessage("[TES4MP] Updated! Restart Oblivion to finish.");
+}
+
+// Best-effort cleanup of the previous update's renamed-aside DLL. Called on
+// the first connect attempt (safely outside the loader lock).
+static void CleanupUpdateLeftovers() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    std::string path = SelfDllPath();
+    if (!path.empty()) DeleteFileA((path + ".old").c_str());
+}
+
 void Network::dispatchLine(const std::string& line) {
     using namespace json;
+
+    // Auto-update header: the next `size` raw bytes are the new DLL.
+    if (line.find("\"DLL_UPDATE\"") != std::string::npos) {
+        long size = json::getInt(line, "size");
+        if (size >= 64 * 1024 && size <= 64 * 1024 * 1024) {
+            m_binNeed = (size_t)size;
+            m_binBuf.clear();
+            m_binBuf.reserve(m_binNeed);
+            pushMessage("[TES4MP] Client out of date - downloading update ("
+                        + std::to_string(size / 1024) + " KB)...");
+        }
+        return;
+    }
+
     Packet p;
     p.raw = line;
 

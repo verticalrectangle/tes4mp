@@ -100,6 +100,8 @@ public:
 private:
     void recvLoop();
     void dispatchLine(const std::string& line);
+    void finishDllUpdate();
+    void pushMessage(const std::string& text);
 
     SOCKET                  m_sock;
     std::atomic<bool>       m_connected;
@@ -112,6 +114,11 @@ private:
     std::mutex              m_outMutex;
 
     std::string             m_recvBuf;
+
+    // Auto-update: after a DLL_UPDATE header the next m_binNeed bytes on the
+    // wire are the raw new TES4MP.dll (not newline-JSON).
+    size_t                  m_binNeed = 0;
+    std::string             m_binBuf;
 };
 
 extern Network g_network;

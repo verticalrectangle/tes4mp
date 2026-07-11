@@ -26,6 +26,26 @@ end
 -- silently on one side) — mismatched clients get a clear KICK instead.
 M.PROTOCOL_VERSION = 2
 
+-- Stream the current client DLL: one DLL_UPDATE json line with the byte
+-- count, then the raw file. LAN-sized (a few MB); sent blocking, one-time
+-- per stale client. Returns false if the file isn't available.
+function M.streamDllUpdate(sock, config)
+    local path = (config and config.client_dll) or "dist/TES4MP.dll"
+    local f = io.open(path, "rb")
+    if not f then
+        print(("[auth] client_dll not found at %s — cannot auto-update"):format(path))
+        return false
+    end
+    local data = f:read("*a")
+    f:close()
+    if not data or #data < 64 * 1024 then return false end
+
+    local json = require("cjson")
+    sock:send(json.encode({ type = "DLL_UPDATE", size = #data }) .. "\n")
+    sock:send(data)
+    return true
+end
+
 function M.handleHello(sock, info, pkt, config)
     local token = tostring(pkt.token or "")
     if #token < 16 then
@@ -35,12 +55,23 @@ function M.handleHello(sock, info, pkt, config)
 
     local ver = tonumber(pkt.ver) or 0
     if ver ~= M.PROTOCOL_VERSION then
-        send(sock, { type = "KICK",
-            reason = ("TES4MP.dll is out of date (protocol %d, server needs %d). "
-                   .. "Update Data\\OBSE\\Plugins\\TES4MP.dll from the server's "
-                   .. "dist folder and reconnect."):format(ver, M.PROTOCOL_VERSION) })
-        print(("[auth] rejected client protocol %d from %s (need %d)")
-            :format(ver, info.addr or "?", M.PROTOCOL_VERSION))
+        -- Protocol 2+ clients know the auto-update stream: send the current
+        -- DLL (raw bytes after a DLL_UPDATE size header); the client swaps
+        -- it on disk and the player just restarts Oblivion. Older clients
+        -- would choke on the binary — they get manual instructions.
+        if ver >= 2 and M.streamDllUpdate(sock, config) then
+            send(sock, { type = "KICK",
+                reason = "TES4MP updated automatically - restart Oblivion to finish." })
+            print(("[auth] streamed DLL update to %s (client protocol %d → %d)")
+                :format(info.addr or "?", ver, M.PROTOCOL_VERSION))
+        else
+            send(sock, { type = "KICK",
+                reason = ("TES4MP.dll is out of date (protocol %d, server needs %d). "
+                       .. "Update Data\\OBSE\\Plugins\\TES4MP.dll from the server's "
+                       .. "dist folder and reconnect."):format(ver, M.PROTOCOL_VERSION) })
+            print(("[auth] rejected client protocol %d from %s (need %d)")
+                :format(ver, info.addr or "?", M.PROTOCOL_VERSION))
+        end
         return
     end
     -- Token prefix in the log: distinguishes "two machines" from "copied install"

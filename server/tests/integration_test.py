@@ -231,6 +231,46 @@ def test_auth_version_mismatch():
     c.close()
 
 
+def test_auth_auto_update_stream():
+    """Updater-capable stale client (ver>=2, wrong) gets DLL_UPDATE header +
+    exact raw bytes + restart KICK."""
+    fixture = "server/data/test_client_dll.bin"
+    payload = b"MZ" + os.urandom(128 * 1024 - 2)
+    with open(fixture, "wb") as f:
+        f.write(payload)
+    try:
+        s = socket.create_connection((HOST, PORT), timeout=3)
+        s.sendall((json.dumps({"type": "HELLO", "token": fresh_token(),
+                               "name": "Stale", "ver": 99}) + "\n").encode())
+        # skip greeting lines (SERVER_HELLO) until the DLL_UPDATE header
+        buf = b""
+        hdr = None
+        for _ in range(5):
+            while b"\n" not in buf:
+                buf += s.recv(4096)
+            line, buf = buf.split(b"\n", 1)
+            hdr = json.loads(line)
+            if hdr.get("type") == "DLL_UPDATE":
+                break
+        assert hdr and hdr.get("type") == "DLL_UPDATE" and hdr.get("size") == len(payload), \
+            f"bad header: {hdr}"
+        # exact byte count, then back to line mode for the KICK
+        while len(buf) < len(payload):
+            chunk = s.recv(65536)
+            assert chunk, "connection closed mid-stream"
+            buf += chunk
+        blob, rest = buf[:len(payload)], buf[len(payload):]
+        assert blob == payload, "streamed bytes corrupt"
+        while b"\n" not in rest:
+            rest += s.recv(4096)
+        kick = json.loads(rest.split(b"\n", 1)[0])
+        assert kick.get("type") == "KICK" and "restart" in kick.get("reason", ""), \
+            f"bad kick: {kick}"
+        s.close()
+    finally:
+        os.remove(fixture)
+
+
 def test_auth_bad_token():
     c = Client()
     c.send({"type": "HELLO", "token": "short", "name": "Hacker", "ver": 2})
@@ -1177,6 +1217,7 @@ def main():
             ("auth: returning player",     test_auth_returning),
             ("auth: bad token → KICK",     test_auth_bad_token),
             ("auth: version mismatch",     test_auth_version_mismatch),
+            ("auth: auto-update stream",   test_auth_auto_update_stream),
             ("join: REVEAL_MARKERS sent",  test_reveal_markers_on_join),
             ("ghost: appear + leave",      test_ghost_appear_leave),
             ("ghost: fast travel flag",    test_fast_travel_flag),

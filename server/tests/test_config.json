@@ -10,5 +10,6 @@
   "session_expiry_hours": 24,
   "dungeon_cooldown_hours": 0,
   "npc_respawn_hours": 0,
-  "pvp": true
+  "pvp": true,
+  "client_dll": "server/data/test_client_dll.bin"
 }
